@@ -69,9 +69,12 @@ describe("system run command helpers", () => {
     },
     { argv: ["fish", "-c", "echo hi"], expected: "echo hi" },
     { argv: ["pwsh", "-Command", "Get-Date"], expected: "Get-Date" },
+    { argv: ["pwsh", "-Command", "/bin/echo", "-File"], expected: "/bin/echo -File" },
+    { argv: ["pwsh", "--command=/bin/echo", "-File"], expected: "/bin/echo -File" },
     { argv: ["pwsh", "-File", "script.ps1"], expected: "script.ps1" },
     { argv: ["powershell", "-f", "script.ps1"], expected: "script.ps1" },
     { argv: ["pwsh", "-EncodedCommand", "ZQBjAGgAbwA="], expected: "ZQBjAGgAbwA=" },
+    { argv: ["pwsh", "-en", "ZQBjAGgAbwA="], expected: "ZQBjAGgAbwA=" },
     { argv: ["powershell", "-enc", "ZQBjAGgAbwA="], expected: "ZQBjAGgAbwA=" },
     { argv: ["busybox", "sh", "-c", "echo hi"], expected: "echo hi" },
     { argv: ["toybox", "ash", "-lc", "echo hi"], expected: "echo hi" },
@@ -84,6 +87,13 @@ describe("system run command helpers", () => {
       null,
     );
     expect(extractShellCommandFromArgv(["/usr/bin/env", "FOO=bar"])).toBe(null);
+  });
+
+  test("extractShellCommandFromArgv ignores inline flags after script operands", () => {
+    expect(extractShellCommandFromArgv(["bash", "./script.sh", "-c", "echo hi"])).toBe(null);
+    expect(extractShellCommandFromArgv(["pwsh", "./script.ps1", "-Command", "Get-Date"])).toBe(
+      null,
+    );
   });
 
   test("extractShellCommandFromArgv includes trailing cmd.exe args after /c", () => {

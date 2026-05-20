@@ -22,14 +22,18 @@ export {
   type ExecArgvToken,
 } from "./exec-command-resolution.js";
 
+export type ExecCommandSource = "argv" | "shell";
+
 export type ExecCommandSegment = {
   raw: string;
   argv: string[];
   resolution: CommandResolution | null;
+  source?: ExecCommandSource;
 };
 
 export type ExecCommandAnalysis = {
   ok: boolean;
+  source?: ExecCommandSource;
   reason?: string;
   segments: ExecCommandSegment[];
   chains?: ExecCommandSegment[][]; // Segments grouped by chain operator (&&, ||, ;)
@@ -654,8 +658,10 @@ function analyzeWindowsShellCommand(params: {
         raw: params.command,
         argv,
         resolution: resolveCommandResolutionFromArgv(argv, params.cwd, params.env),
+        source: "shell",
       },
     ],
+    source: "shell",
   };
 }
 
@@ -679,6 +685,7 @@ function parseSegmentsFromParts(
       raw,
       argv,
       resolution: resolveCommandResolutionFromArgv(argv, cwd, env),
+      source: "shell",
     });
   }
   return segments;
@@ -1002,7 +1009,7 @@ function renderSafeBinSegmentArgv(
 export function buildSafeBinsShellCommand(params: {
   command: string;
   segments: ExecCommandSegment[];
-  segmentSatisfiedBy: ("allowlist" | "safeBins" | "skills" | "skillPrelude" | null)[];
+  segmentSatisfiedBy: ("allowlist" | "safeBins" | "skills" | null)[];
   platform?: string | null;
 }): { ok: boolean; command?: string; reason?: string } {
   if (params.segments.length !== params.segmentSatisfiedBy.length) {
@@ -1098,7 +1105,7 @@ export function analyzeShellCommand(params: {
       allSegments.push(...segments);
     }
 
-    return { ok: true, segments: allSegments, chains };
+    return { ok: true, source: "shell", segments: allSegments, chains };
   }
 
   // No chain operators, parse as simple pipeline
@@ -1110,7 +1117,7 @@ export function analyzeShellCommand(params: {
   if (!segments) {
     return { ok: false, reason: "unable to parse shell segment", segments: [] };
   }
-  return { ok: true, segments };
+  return { ok: true, source: "shell", segments };
 }
 
 export function analyzeArgvCommand(params: {
@@ -1124,11 +1131,13 @@ export function analyzeArgvCommand(params: {
   }
   return {
     ok: true,
+    source: "argv",
     segments: [
       {
         raw: argv.join(" "),
         argv,
         resolution: resolveCommandResolutionFromArgv(argv, params.cwd, params.env),
+        source: "argv",
       },
     ],
   };

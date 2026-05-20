@@ -16,6 +16,7 @@ type ExecApprovalsModule = typeof import("./exec-approvals.js");
 let addAllowlistEntry: ExecApprovalsModule["addAllowlistEntry"];
 let addDurableCommandApproval: ExecApprovalsModule["addDurableCommandApproval"];
 let ensureExecApprovals: ExecApprovalsModule["ensureExecApprovals"];
+let hasDurableExecApproval: ExecApprovalsModule["hasDurableExecApproval"];
 let mergeExecApprovalsSocketDefaults: ExecApprovalsModule["mergeExecApprovalsSocketDefaults"];
 let normalizeExecApprovals: ExecApprovalsModule["normalizeExecApprovals"];
 let persistAllowAlwaysPatterns: ExecApprovalsModule["persistAllowAlwaysPatterns"];
@@ -35,6 +36,7 @@ beforeAll(async () => {
     addAllowlistEntry,
     addDurableCommandApproval,
     ensureExecApprovals,
+    hasDurableExecApproval,
     mergeExecApprovalsSocketDefaults,
     normalizeExecApprovals,
     persistAllowAlwaysPatterns,
@@ -443,6 +445,48 @@ describe("exec approvals store helpers", () => {
       /^=command:[0-9a-f]{16}$/i,
     );
     expect(readApprovalsFile(dir).agents?.worker?.allowlist?.[0]).not.toHaveProperty("commandText");
+  });
+
+  it("binds durable command approvals to cwd and env context", () => {
+    const dir = createHomeDir();
+    const approvals = ensureExecApprovals();
+    const commandText = 'command sh -c "./run-safe"';
+    addDurableCommandApproval(approvals, "worker", commandText, {
+      cwd: "/tmp/project-a",
+      env: { SAFE: "1" },
+    });
+
+    const allowlist = readApprovalsFile(dir).agents?.worker?.allowlist ?? [];
+    expect(
+      hasDurableExecApproval({
+        analysisOk: false,
+        segmentAllowlistEntries: [],
+        allowlist,
+        commandText,
+        cwd: "/tmp/project-a",
+        env: { SAFE: "1" },
+      }),
+    ).toBe(true);
+    expect(
+      hasDurableExecApproval({
+        analysisOk: false,
+        segmentAllowlistEntries: [],
+        allowlist,
+        commandText,
+        cwd: "/tmp/project-b",
+        env: { SAFE: "1" },
+      }),
+    ).toBe(false);
+    expect(
+      hasDurableExecApproval({
+        analysisOk: false,
+        segmentAllowlistEntries: [],
+        allowlist,
+        commandText,
+        cwd: "/tmp/project-a",
+        env: { SAFE: "2" },
+      }),
+    ).toBe(false);
   });
 
   it("strips legacy plaintext command text during normalization", () => {

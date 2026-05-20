@@ -4,12 +4,17 @@ import {
   extractEnvAssignmentKeysFromDispatchWrappers,
   extractShellWrapperCommand,
   extractShellWrapperInlineCommand,
+  extractShellWrapperInlineCommandThroughCarriers,
   hasEnvManipulationBeforeShellWrapper,
+  hasEnvManipulationBeforeShellWrapperInvocation,
+  hasPolicyBlockedCarrierBeforeShellWrapperInvocation,
+  hasShellAssignmentPrefixBeforeShellWrapperInvocation,
   isDispatchWrapperExecutable,
   isShellWrapperExecutable,
   isShellWrapperInvocation,
   normalizeExecutableToken,
   resolveDispatchWrapperTrustPlan,
+  resolveShellWrapperArgvThroughCarriers,
   resolveShellWrapperTransportArgv,
   unwrapEnvInvocation,
   unwrapKnownDispatchWrapperInvocation,
@@ -111,6 +116,14 @@ describe("unwrapEnvInvocation", () => {
     {
       argv: ["env", "-i", "--unset", "PATH", "--", "sh", "-lc", "echo hi"],
       expected: ["sh", "-lc", "echo hi"],
+    },
+    {
+      argv: ["env", "--", "FOO=bar", "bash", "-lc", "echo hi"],
+      expected: ["bash", "-lc", "echo hi"],
+    },
+    {
+      argv: ["env", "-", "FOO=bar", "bash", "-lc", "echo hi"],
+      expected: ["bash", "-lc", "echo hi"],
     },
     {
       argv: ["env", "--chdir=/tmp", "pwsh", "-Command", "Get-Date"],
@@ -364,6 +377,22 @@ describe("resolveDispatchWrapperTrustPlan", () => {
       policyBlocked: true,
       blockedWrapper: "env",
     });
+    expect(
+      resolveDispatchWrapperTrustPlan(["env", "--", "FOO=bar", "bash", "-lc", "echo hi"]),
+    ).toEqual({
+      argv: ["env", "--", "FOO=bar", "bash", "-lc", "echo hi"],
+      wrappers: ["env"],
+      policyBlocked: true,
+      blockedWrapper: "env",
+    });
+    expect(
+      resolveDispatchWrapperTrustPlan(["env", "-", "FOO=bar", "bash", "-lc", "echo hi"]),
+    ).toEqual({
+      argv: ["env", "-", "FOO=bar", "bash", "-lc", "echo hi"],
+      wrappers: ["env"],
+      policyBlocked: true,
+      blockedWrapper: "env",
+    });
   });
 
   test("blocks wrapper overflow beyond the configured depth", () => {
@@ -398,6 +427,227 @@ describe("hasEnvManipulationBeforeShellWrapper", () => {
     },
   ])("detects env manipulation before shell wrappers for %j", ({ argv, expected }) => {
     expect(hasEnvManipulationBeforeShellWrapper(argv)).toBe(expected);
+  });
+});
+
+describe("hasEnvManipulationBeforeShellWrapperInvocation", () => {
+  test.each([
+    {
+      argv: ["env", "BASH_ENV=/tmp/payload", "bash", "./script.sh"],
+      expected: true,
+    },
+    {
+      argv: ["env", "--", "bash", "./script.sh"],
+      expected: false,
+    },
+    {
+      argv: ["env", "FOO=bar", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["env", "--", "FOO=bar", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["env", "-", "FOO=bar", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["env", "FOO=bar", "sudo", "bash", "-lc", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["env", "BASH_ENV=/tmp/payload", "sudo", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "env", "BASH_ENV=/tmp/payload", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "BASH_ENV=/tmp/payload", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "-i", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "--login", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "-s", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "--shell", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "-E", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["sudo", "--preserve-env=BASH_ENV", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["doas", "-s", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["exec", "-c", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+  ])("detects env manipulation before shell wrapper invocations for %j", ({ argv, expected }) => {
+    expect(hasEnvManipulationBeforeShellWrapperInvocation(argv)).toBe(expected);
+  });
+});
+
+describe("hasShellAssignmentPrefixBeforeShellWrapperInvocation", () => {
+  test.each([
+    {
+      argv: ["BASH_ENV=/tmp/payload", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["FOO=bar", "env", "bash", "./script.sh"],
+      expected: true,
+    },
+    {
+      argv: ["BASH_ENV=/tmp/payload", "command", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["BASH_ENV=/tmp/payload", "sudo", "bash", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["FOO=bar", "node", "tool.js"],
+      expected: false,
+    },
+    {
+      argv: ["FOO=bar"],
+      expected: false,
+    },
+  ])(
+    "detects assignment prefixes before shell wrapper invocations for %j",
+    ({ argv, expected }) => {
+      expect(hasShellAssignmentPrefixBeforeShellWrapperInvocation(argv)).toBe(expected);
+    },
+  );
+});
+
+describe("resolveShellWrapperArgvThroughCarriers", () => {
+  test.each([
+    {
+      argv: ["command", "bash", "-lc", "echo hi"],
+      expected: ["bash", "-lc", "echo hi"],
+    },
+    {
+      argv: ["sudo", "-u", "root", "bash", "-lc", "echo hi"],
+      expected: null,
+    },
+    {
+      argv: ["exec", "--", "bash", "-lc", "echo hi"],
+      expected: ["bash", "-lc", "echo hi"],
+    },
+    {
+      argv: ["env", "FOO=bar", "sudo", "bash", "-lc", "echo hi"],
+      expected: null,
+    },
+    {
+      argv: ["command", "command", "command", "command", "command", "bash", "-lc", "echo hi"],
+      expected: null,
+    },
+    {
+      argv: ["command", "-v", "bash"],
+      expected: null,
+    },
+    {
+      argv: ["node", "tool.js"],
+      expected: null,
+    },
+  ])("resolves carrier-wrapped shell invocations for %j", ({ argv, expected }) => {
+    expect(resolveShellWrapperArgvThroughCarriers(argv)).toEqual(expected);
+  });
+});
+
+describe("hasPolicyBlockedCarrierBeforeShellWrapperInvocation", () => {
+  test.each([
+    {
+      argv: ["sudo", "bash", "-lc", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["command", "sudo", "bash", "-lc", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["nice", "command", "doas", "sh", "-c", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["command", "command", "command", "command", "command", "bash", "-lc", "echo hi"],
+      expected: true,
+    },
+    {
+      argv: ["command", "bash", "-lc", "echo hi"],
+      expected: false,
+    },
+    {
+      argv: ["env", "FOO=bar", "bash", "-lc", "echo hi"],
+      expected: false,
+    },
+    {
+      argv: ["node", "tool.js"],
+      expected: false,
+    },
+  ])(
+    "detects policy-blocked carriers before shell wrapper invocations for %j",
+    ({ argv, expected }) => {
+      expect(hasPolicyBlockedCarrierBeforeShellWrapperInvocation(argv)).toBe(expected);
+    },
+  );
+});
+
+describe("extractShellWrapperInlineCommandThroughCarriers", () => {
+  test.each([
+    {
+      argv: ["sh", "-c", 'bash -lc "echo hi"'],
+      expected: 'bash -lc "echo hi"',
+    },
+    {
+      argv: ["command", "sh", "-c", 'bash -lc "echo hi"'],
+      expected: 'bash -lc "echo hi"',
+    },
+    {
+      argv: ["sudo", "sh", "-c", 'bash -lc "echo hi"'],
+      expected: null,
+    },
+    {
+      argv: ["exec", "--", "sh", "-c", 'bash -lc "echo hi"'],
+      expected: 'bash -lc "echo hi"',
+    },
+    {
+      argv: ["command", "command", "command", "command", "command", "sh", "-c", "echo hi"],
+      expected: null,
+    },
+    {
+      argv: ["node", "tool.js"],
+      expected: null,
+    },
+    {
+      argv: ["bash", "./script.sh", "-c", "echo hi"],
+      expected: null,
+    },
+    {
+      argv: ["pwsh", "./script.ps1", "-Command", "Get-Date"],
+      expected: null,
+    },
+  ])("extracts carrier-wrapped shell inline commands for %j", ({ argv, expected }) => {
+    expect(extractShellWrapperInlineCommandThroughCarriers(argv)).toBe(expected);
   });
 });
 
@@ -461,6 +711,14 @@ describe("extractEnvAssignmentKeysFromDispatchWrappers", () => {
       argv: ["env", "--", "bash", "-lc", "echo hi"],
       expected: [],
     },
+    {
+      argv: ["env", "--", "FOO=bar", "BASH_ENV=/tmp/payload", "bash", "-lc", "echo hi"],
+      expected: ["BASH_ENV", "FOO"],
+    },
+    {
+      argv: ["env", "-", "BASH_ENV=/tmp/payload", "bash", "-lc", "echo hi"],
+      expected: ["BASH_ENV"],
+    },
   ])("extracts env assignment prelude keys for %j", ({ argv, expected }) => {
     expect(extractEnvAssignmentKeysFromDispatchWrappers(argv)).toEqual(expected);
   });
@@ -484,9 +742,34 @@ describe("extractShellWrapperCommand", () => {
       expectedCommand: { isWrapper: true, command: "Get-Date" },
     },
     {
+      argv: ["pwsh", "/NoProfile", "-Command", "Get-Date"],
+      expectedInline: "Get-Date",
+      expectedCommand: { isWrapper: true, command: "Get-Date" },
+    },
+    {
+      argv: ["pwsh", "-Command", "/bin/echo", "-File"],
+      expectedInline: "/bin/echo -File",
+      expectedCommand: { isWrapper: true, command: "/bin/echo -File" },
+    },
+    {
+      argv: ["pwsh", "--command=/bin/echo", "-File"],
+      expectedInline: "/bin/echo -File",
+      expectedCommand: { isWrapper: true, command: "/bin/echo -File" },
+    },
+    {
       argv: ["bash", "script.sh"],
       expectedInline: null,
       expectedCommand: { isWrapper: false, command: null },
+    },
+    {
+      argv: ["bash", "./script.sh", "-c", "echo hi"],
+      expectedInline: null,
+      expectedCommand: { isWrapper: false, command: null },
+    },
+    {
+      argv: ["bash", "-o", "pipefail", "-c", "echo hi"],
+      expectedInline: "echo hi",
+      expectedCommand: { isWrapper: true, command: "echo hi" },
     },
   ])("extracts inline commands for %j", ({ argv, expectedInline, expectedCommand }) => {
     expect(extractShellWrapperInlineCommand(argv)).toBe(expectedInline);

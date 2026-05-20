@@ -342,6 +342,16 @@ export function createExecApprovalDecisionState(params: {
   };
 }
 
+export function resolveExecApprovalAllowedDecisionsForPersistence(params: {
+  ask?: string | null;
+  allowAlwaysAvailable: boolean;
+}): readonly ExecApprovalDecision[] {
+  const decisions = resolveExecApprovalAllowedDecisions({ ask: params.ask });
+  return params.allowAlwaysAvailable
+    ? decisions
+    : decisions.filter((decision) => decision !== "allow-always");
+}
+
 export function enforceStrictInlineEvalApprovalBoundary(params: {
   baseDecision: {
     timedOut: boolean;

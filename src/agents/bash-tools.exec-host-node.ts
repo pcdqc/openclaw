@@ -1,9 +1,6 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { APPROVALS_SCOPE, WRITE_SCOPE } from "../gateway/operator-scopes.js";
-import {
-  requiresExecApproval,
-  resolveExecApprovalAllowedDecisions,
-} from "../infra/exec-approvals.js";
+import { requiresExecApproval } from "../infra/exec-approvals.js";
 import {
   buildExecApprovalRequesterContext,
   buildExecApprovalTurnSourceContext,
@@ -60,8 +57,13 @@ export async function executeNodeHostCommand(
     hostSecurity,
     hostAsk,
   });
-  const { analysisOk, allowlistSatisfied, durableApprovalSatisfied, inlineEvalHit } =
-    approvalAnalysis;
+  const {
+    analysisOk,
+    allowlistSatisfied,
+    durableApprovalSatisfied,
+    inlineEvalHit,
+    allowAlwaysAvailable,
+  } = approvalAnalysis;
   const requiresAsk =
     requiresExecApproval({
       ask: hostAsk,
@@ -82,6 +84,10 @@ export async function executeNodeHostCommand(
       turnSourceChannel: params.turnSourceChannel,
       turnSourceAccountId: params.turnSourceAccountId,
     });
+    const allowedDecisions = execHostShared.resolveExecApprovalAllowedDecisionsForPersistence({
+      ask: hostAsk,
+      allowAlwaysAvailable,
+    });
     const registerNodeApproval = async (approvalId: string) =>
       await registerExecApprovalRequestForHostOrThrow({
         approvalId,
@@ -92,6 +98,7 @@ export async function executeNodeHostCommand(
         nodeId: target.nodeId,
         security: hostSecurity,
         ask: hostAsk,
+        allowedDecisions,
         ...buildExecApprovalRequesterContext({
           agentId: prepared.agentId,
           sessionKey: prepared.sessionKey,
@@ -185,8 +192,12 @@ export async function executeNodeHostCommand(
           approvedByAsk = true;
           approvalDecision = "allow-once";
         } else if (decision === "allow-always") {
-          approvedByAsk = true;
-          approvalDecision = "allow-always";
+          if (!allowAlwaysAvailable) {
+            deniedReason = "approval-decision-unavailable";
+          } else {
+            approvedByAsk = true;
+            approvalDecision = "allow-always";
+          }
         }
 
         ({ approvedByAsk, deniedReason } = execHostShared.enforceStrictInlineEvalApprovalBoundary({
@@ -268,7 +279,7 @@ export async function executeNodeHostCommand(
         initiatingSurface,
         sentApproverDms,
         unavailableReason,
-        allowedDecisions: resolveExecApprovalAllowedDecisions({ ask: hostAsk }),
+        allowedDecisions,
         nodeId: target.nodeId,
       });
     }

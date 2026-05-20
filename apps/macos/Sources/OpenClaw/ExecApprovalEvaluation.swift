@@ -4,16 +4,23 @@ struct ExecApprovalEvaluation {
     let command: [String]
     let displayCommand: String
     let agentId: String?
+    let cwd: String?
+    let approvalEnv: [String: String]?
     let security: ExecSecurity
     let ask: ExecAsk
     let env: [String: String]
     let resolution: ExecCommandResolution?
     let allowlistResolutions: [ExecCommandResolution]
     let allowAlwaysPatterns: [String]
+    let exactCommandDurableApprovalAllowed: Bool
     let allowlistMatches: [ExecAllowlistEntry]
     let allowlistSatisfied: Bool
     let allowlistMatch: ExecAllowlistEntry?
     let skillAllow: Bool
+
+    var allowAlwaysAvailable: Bool {
+        !self.allowAlwaysPatterns.isEmpty || self.exactCommandDurableApprovalAllowed
+    }
 }
 
 enum ExecApprovalEvaluator {
@@ -31,7 +38,10 @@ enum ExecApprovalEvaluator {
         let ask = approvals.agent.ask
         let shellWrapper = ExecShellWrapperParser.extract(command: command, rawCommand: rawCommand).isWrapper
         let env = HostEnvSanitizer.sanitize(overrides: envOverrides, shellWrapper: shellWrapper)
-        let displayCommand = ExecCommandFormatter.displayString(for: command, rawCommand: rawCommand)
+        let approvalEnv = HostEnvSanitizer.sanitizeOverridesForBinding(
+            overrides: envOverrides,
+            shellWrapper: shellWrapper)
+        let displayCommand = ExecCommandFormatter.displayString(for: command)
         let allowlistRawCommand = ExecSystemRunCommandValidator.allowlistEvaluationRawCommand(
             command: command,
             rawCommand: rawCommand)
@@ -44,12 +54,32 @@ enum ExecApprovalEvaluator {
             command: command,
             cwd: cwd,
             env: env)
-        let allowlistMatches = security == .allowlist
+        let pathAllowlistMatches = security == .allowlist
             ? ExecAllowlistMatcher.matchAll(entries: approvals.allowlist, resolutions: allowlistResolutions)
             : []
-        let allowlistSatisfied = security == .allowlist &&
+        let pathAllowlistSatisfied = security == .allowlist &&
             !allowlistResolutions.isEmpty &&
-            allowlistMatches.count == allowlistResolutions.count
+            pathAllowlistMatches.count == allowlistResolutions.count
+        let exactCommandDurableApprovalAllowed =
+            ExecApprovalHelpers.durableCommandApprovalPattern(
+                displayCommand,
+                cwd: cwd,
+                env: approvalEnv) != nil &&
+            ExecCommandResolution.allowsExactCommandDurableApproval(
+                command: command,
+                cwd: cwd,
+                env: env)
+        let exactCommandMatch = security == .allowlist && exactCommandDurableApprovalAllowed
+            ? ExecApprovalHelpers.exactCommandDurableApprovalMatch(
+                entries: approvals.allowlist,
+                commandText: displayCommand,
+                cwd: cwd,
+                env: approvalEnv)
+            : nil
+        let allowlistMatches = pathAllowlistSatisfied
+            ? pathAllowlistMatches
+            : exactCommandMatch.map { [$0] } ?? []
+        let allowlistSatisfied = pathAllowlistSatisfied || exactCommandMatch != nil
 
         let skillAllow: Bool
         if approvals.agent.autoAllowSkills, !allowlistResolutions.isEmpty {
@@ -63,12 +93,15 @@ enum ExecApprovalEvaluator {
             command: command,
             displayCommand: displayCommand,
             agentId: normalizedAgentId,
+            cwd: cwd,
+            approvalEnv: approvalEnv,
             security: security,
             ask: ask,
             env: env,
             resolution: allowlistResolutions.first,
             allowlistResolutions: allowlistResolutions,
             allowAlwaysPatterns: allowAlwaysPatterns,
+            exactCommandDurableApprovalAllowed: exactCommandDurableApprovalAllowed,
             allowlistMatches: allowlistMatches,
             allowlistSatisfied: allowlistSatisfied,
             allowlistMatch: allowlistSatisfied ? allowlistMatches.first : nil,

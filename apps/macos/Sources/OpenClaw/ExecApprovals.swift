@@ -118,6 +118,8 @@ struct ExecAllowlistRejectedEntry: Equatable {
 struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
     var id: UUID
     var pattern: String
+    var source: String?
+    var commandText: String?
     var lastUsedAt: Double?
     var lastUsedCommand: String?
     var lastResolvedPath: String?
@@ -125,12 +127,16 @@ struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
     init(
         id: UUID = UUID(),
         pattern: String,
+        source: String? = nil,
+        commandText: String? = nil,
         lastUsedAt: Double? = nil,
         lastUsedCommand: String? = nil,
         lastResolvedPath: String? = nil)
     {
         self.id = id
         self.pattern = pattern
+        self.source = source
+        self.commandText = commandText
         self.lastUsedAt = lastUsedAt
         self.lastUsedCommand = lastUsedCommand
         self.lastResolvedPath = lastResolvedPath
@@ -139,6 +145,8 @@ struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id
         case pattern
+        case source
+        case commandText
         case lastUsedAt
         case lastUsedCommand
         case lastResolvedPath
@@ -148,6 +156,8 @@ struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         self.pattern = try container.decode(String.self, forKey: .pattern)
+        self.source = try container.decodeIfPresent(String.self, forKey: .source)
+        self.commandText = nil
         self.lastUsedAt = try container.decodeIfPresent(Double.self, forKey: .lastUsedAt)
         self.lastUsedCommand = try container.decodeIfPresent(String.self, forKey: .lastUsedCommand)
         self.lastResolvedPath = try container.decodeIfPresent(String.self, forKey: .lastResolvedPath)
@@ -157,6 +167,7 @@ struct ExecAllowlistEntry: Codable, Hashable, Identifiable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.id, forKey: .id)
         try container.encode(self.pattern, forKey: .pattern)
+        try container.encodeIfPresent(self.source, forKey: .source)
         try container.encodeIfPresent(self.lastUsedAt, forKey: .lastUsedAt)
         try container.encodeIfPresent(self.lastUsedCommand, forKey: .lastUsedCommand)
         try container.encodeIfPresent(self.lastResolvedPath, forKey: .lastResolvedPath)
@@ -467,7 +478,11 @@ enum ExecApprovalsStore {
     }
 
     @discardableResult
-    static func addAllowlistEntry(agentId: String?, pattern: String) -> ExecAllowlistPatternValidationReason? {
+    static func addAllowlistEntry(
+        agentId: String?,
+        pattern: String,
+        source: String? = nil) -> ExecAllowlistPatternValidationReason?
+    {
         let normalizedPattern: String
         switch ExecApprovalHelpers.validateAllowlistPattern(pattern) {
         case let .valid(validPattern):
@@ -481,15 +496,41 @@ enum ExecApprovalsStore {
             var agents = file.agents ?? [:]
             var entry = agents[key] ?? ExecApprovalsAgent()
             var allowlist = entry.allowlist ?? []
-            if allowlist.contains(where: { $0.pattern == normalizedPattern }) { return }
+            if let index = allowlist.firstIndex(where: { $0.pattern == normalizedPattern }) {
+                if source != nil, allowlist[index].source != source {
+                    allowlist[index].source = source
+                    entry.allowlist = allowlist
+                    agents[key] = entry
+                    file.agents = agents
+                }
+                return
+            }
             allowlist.append(ExecAllowlistEntry(
                 pattern: normalizedPattern,
+                source: source,
                 lastUsedAt: Date().timeIntervalSince1970 * 1000))
             entry.allowlist = allowlist
             agents[key] = entry
             file.agents = agents
         }
         return nil
+    }
+
+    @discardableResult
+    static func addDurableCommandApproval(
+        agentId: String?,
+        commandText: String,
+        cwd: String? = nil,
+        env: [String: String]? = nil) -> ExecAllowlistPatternValidationReason?
+    {
+        guard let pattern = ExecApprovalHelpers.durableCommandApprovalPattern(
+            commandText,
+            cwd: cwd,
+            env: env)
+        else {
+            return .empty
+        }
+        return self.addAllowlistEntry(agentId: agentId, pattern: pattern, source: "allow-always")
     }
 
     static func recordAllowlistUse(
@@ -507,6 +548,8 @@ enum ExecApprovalsStore {
                 return ExecAllowlistEntry(
                     id: item.id,
                     pattern: item.pattern,
+                    source: item.source,
+                    commandText: nil,
                     lastUsedAt: Date().timeIntervalSince1970 * 1000,
                     lastUsedCommand: command,
                     lastResolvedPath: resolvedPath)
@@ -642,6 +685,8 @@ enum ExecApprovalsStore {
             return ExecAllowlistEntry(
                 id: entry.id,
                 pattern: migratedPattern,
+                source: entry.source,
+                commandText: nil,
                 lastUsedAt: entry.lastUsedAt,
                 lastUsedCommand: entry.lastUsedCommand,
                 lastResolvedPath: normalizedResolved)
@@ -652,6 +697,8 @@ enum ExecApprovalsStore {
             return ExecAllowlistEntry(
                 id: entry.id,
                 pattern: pattern,
+                source: entry.source,
+                commandText: nil,
                 lastUsedAt: entry.lastUsedAt,
                 lastUsedCommand: entry.lastUsedCommand,
                 lastResolvedPath: normalizedResolved)
@@ -661,6 +708,8 @@ enum ExecApprovalsStore {
                 return ExecAllowlistEntry(
                     id: entry.id,
                     pattern: migratedPattern,
+                    source: entry.source,
+                    commandText: nil,
                     lastUsedAt: entry.lastUsedAt,
                     lastUsedCommand: entry.lastUsedCommand,
                     lastResolvedPath: normalizedResolved)
@@ -668,6 +717,8 @@ enum ExecApprovalsStore {
                 return ExecAllowlistEntry(
                     id: entry.id,
                     pattern: trimmedPattern,
+                    source: entry.source,
+                    commandText: nil,
                     lastUsedAt: entry.lastUsedAt,
                     lastUsedCommand: entry.lastUsedCommand,
                     lastResolvedPath: normalizedResolved)
@@ -695,6 +746,8 @@ enum ExecApprovalsStore {
                     ExecAllowlistEntry(
                         id: migrated.id,
                         pattern: pattern,
+                        source: migrated.source,
+                        commandText: nil,
                         lastUsedAt: migrated.lastUsedAt,
                         lastUsedCommand: migrated.lastUsedCommand,
                         lastResolvedPath: normalizedResolvedPath))
@@ -710,6 +763,8 @@ enum ExecApprovalsStore {
                         ExecAllowlistEntry(
                             id: migrated.id,
                             pattern: trimmedPattern,
+                            source: migrated.source,
+                            commandText: nil,
                             lastUsedAt: migrated.lastUsedAt,
                             lastUsedCommand: migrated.lastUsedCommand,
                             lastResolvedPath: normalizedResolvedPath))
@@ -752,6 +807,79 @@ enum ExecApprovalsStore {
 }
 
 enum ExecApprovalHelpers {
+    private static let defaultAllowedDecisions: [ExecApprovalDecision] = [
+        .allowOnce,
+        .allowAlways,
+        .deny,
+    ]
+
+    private static func normalizedDurableCommandCwd(_ cwd: String?) -> String? {
+        let normalized = cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func canonicalDurableCommandJSONData(_ value: Any) -> Data? {
+        try? JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes])
+    }
+
+    private static func durableCommandApprovalEnvHash(_ env: [String: String]?) -> String? {
+        guard let env, !env.isEmpty else { return nil }
+        let entries = env
+            .filter { !$0.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.key.localizedCompare($1.key) == .orderedAscending }
+            .map { [$0.key, $0.value] }
+        guard !entries.isEmpty,
+              let data = self.canonicalDurableCommandJSONData(entries)
+        else {
+            return nil
+        }
+        return SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    static func durableCommandApprovalPattern(
+        _ commandText: String?,
+        cwd: String? = nil,
+        env: [String: String]? = nil) -> String?
+    {
+        let normalized = commandText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalized.isEmpty else { return nil }
+        let identity: [Any] = [
+            "v1",
+            normalized,
+            self.normalizedDurableCommandCwd(cwd) as Any? ?? NSNull(),
+            self.durableCommandApprovalEnvHash(env) as Any? ?? NSNull(),
+        ]
+        guard let data = self.canonicalDurableCommandJSONData(identity) else {
+            return nil
+        }
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+            .prefix(16)
+        return "=command:\(digest)"
+    }
+
+    static func exactCommandDurableApprovalMatch(
+        entries: [ExecAllowlistEntry],
+        commandText: String?,
+        cwd: String? = nil,
+        env: [String: String]? = nil) -> ExecAllowlistEntry?
+    {
+        guard let pattern = self.durableCommandApprovalPattern(
+            commandText,
+            cwd: cwd,
+            env: env)
+        else {
+            return nil
+        }
+        return entries.first { entry in
+            guard entry.source == "allow-always" else { return false }
+            return entry.pattern == pattern
+        }
+    }
+
     static func validateAllowlistPattern(_ pattern: String?) -> ExecAllowlistPatternValidation {
         let trimmed = pattern?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !trimmed.isEmpty else { return .invalid(.empty) }
@@ -787,6 +915,45 @@ enum ExecApprovalHelpers {
         if ask == .always { return true }
         if ask == .onMiss, security == .allowlist, allowlistMatch == nil, !skillAllow { return true }
         return false
+    }
+
+    static func allowedDecisions(
+        ask: ExecAsk,
+        allowAlwaysAvailable: Bool = true) -> [ExecApprovalDecision]
+    {
+        let policyDecisions = self.policyAllowedDecisions(ask: ask.rawValue)
+        if allowAlwaysAvailable {
+            return policyDecisions
+        }
+        return policyDecisions.filter { $0 != .allowAlways }
+    }
+
+    static func requestAllowedDecisions(
+        ask: String?,
+        allowedDecisions requestedDecisions: [ExecApprovalDecision]?) -> [ExecApprovalDecision]
+    {
+        let policyDecisions = self.policyAllowedDecisions(ask: ask)
+        guard let requestedDecisions, !requestedDecisions.isEmpty else {
+            return policyDecisions
+        }
+        var decisions: [ExecApprovalDecision] = []
+        for decision in requestedDecisions where policyDecisions.contains(decision) {
+            if !decisions.contains(decision) {
+                decisions.append(decision)
+            }
+        }
+        if !decisions.contains(.deny) {
+            decisions.append(.deny)
+        }
+        return decisions
+    }
+
+    private static func policyAllowedDecisions(ask: String?) -> [ExecApprovalDecision] {
+        let normalizedAsk = ask?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedAsk.flatMap(ExecAsk.init(rawValue:)) == .always {
+            return [.allowOnce, .deny]
+        }
+        return self.defaultAllowedDecisions
     }
 
     static func allowlistPattern(command: [String], resolution: ExecCommandResolution?) -> String? {

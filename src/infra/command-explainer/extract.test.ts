@@ -390,14 +390,13 @@ describe("command explainer tree-sitter runtime", () => {
       }),
     );
 
-    const combinedInline = await explainShellCommand('bash -c"echo hi"');
-    expect(combinedInline.risks).toContainEqual(
+    const attachedInline = await explainShellCommand('bash -c"echo hi"');
+    expect(attachedInline.risks).not.toContainEqual(
       expect.objectContaining({
         kind: "shell-wrapper",
-        executable: "bash",
-        payload: "echo hi",
       }),
     );
+    expect(attachedInline.topLevelCommands[0]?.argv).toEqual(["bash", "-cecho hi"]);
 
     const powershell = await explainShellCommand('pwsh -Command "Get-ChildItem"');
     expect(powershell.risks).toContainEqual(

@@ -7,7 +7,6 @@ import {
 import type { ExecApprovalForwarder } from "../../infra/exec-approval-forwarder.js";
 import {
   DEFAULT_EXEC_APPROVAL_TIMEOUT_MS,
-  resolveExecApprovalAllowedDecisions,
   resolveExecApprovalRequestAllowedDecisions,
   type ExecApprovalDecision,
   type ExecApprovalRequest,
@@ -41,7 +40,24 @@ import type { GatewayRequestHandlers } from "./types.js";
 const APPROVAL_ALLOW_ALWAYS_UNAVAILABLE_DETAILS = {
   reason: "APPROVAL_ALLOW_ALWAYS_UNAVAILABLE",
 } as const;
+const APPROVAL_DECISION_UNAVAILABLE_DETAILS = {
+  reason: "APPROVAL_DECISION_UNAVAILABLE",
+} as const;
 const RESERVED_PLUGIN_APPROVAL_ID_PREFIX = "plugin:";
+
+function resolveUnavailableExecApprovalDecisionError(decision: ExecApprovalDecision) {
+  if (decision === "allow-always") {
+    return {
+      message:
+        "allow-always is unavailable because the effective policy requires approval every time",
+      details: APPROVAL_ALLOW_ALWAYS_UNAVAILABLE_DETAILS,
+    };
+  }
+  return {
+    message: `${decision} is unavailable for this approval request`,
+    details: APPROVAL_DECISION_UNAVAILABLE_DETAILS,
+  };
+}
 
 type ExecApprovalIosPushDelivery = {
   handleRequested?: (request: ExecApprovalRequest) => Promise<boolean>;
@@ -138,6 +154,7 @@ export function createExecApprovalHandlers(
           startIndex: number;
           endIndex: number;
         }[];
+        allowedDecisions?: string[] | null;
         agentId?: string;
         resolvedPath?: string;
         sessionKey?: string;
@@ -258,7 +275,10 @@ export function createExecApprovalHandlers(
         warningText: warningText ? sanitizeExecApprovalWarningText(warningText) : null,
         commandAnalysis,
         commandSpans,
-        allowedDecisions: resolveExecApprovalAllowedDecisions({ ask: p.ask ?? null }),
+        allowedDecisions: resolveExecApprovalRequestAllowedDecisions({
+          ask: p.ask ?? null,
+          allowedDecisions: p.allowedDecisions ?? null,
+        }),
         agentId: effectiveAgentId ?? null,
         resolvedPath: p.resolvedPath ?? null,
         sessionKey: effectiveSessionKey ?? null,
@@ -383,11 +403,7 @@ export function createExecApprovalHandlers(
           const allowedDecisions = resolveExecApprovalRequestAllowedDecisions(snapshot.request);
           return allowedDecisions.includes(decision)
             ? null
-            : {
-                message:
-                  "allow-always is unavailable because the effective policy requires approval every time",
-                details: APPROVAL_ALLOW_ALWAYS_UNAVAILABLE_DETAILS,
-              };
+            : resolveUnavailableExecApprovalDecisionError(decision);
         },
         resolvedEventName: "exec.approval.resolved",
         buildResolvedEvent: ({ approvalId, decision, resolvedBy, snapshot, nowMs }) =>

@@ -1,5 +1,6 @@
 import type {
   ExecApprovalCommandSpan,
+  ExecApprovalDecision,
   ExecAsk,
   ExecSecurity,
   SystemRunApprovalPlan,
@@ -35,6 +36,7 @@ export type RequestExecApprovalDecisionParams = {
   ask: ExecAsk;
   warningText?: string;
   commandSpans?: ExecApprovalCommandSpan[];
+  allowedDecisions?: readonly ExecApprovalDecision[];
   agentId?: string;
   resolvedPath?: string;
   sessionKey?: string;
@@ -65,6 +67,7 @@ function buildExecApprovalRequestToolParams(
     ask: params.ask,
     warningText: params.warningText,
     commandSpans: params.commandSpans,
+    allowedDecisions: params.allowedDecisions,
     agentId: params.agentId,
     resolvedPath: params.resolvedPath,
     sessionKey: params.sessionKey,
@@ -178,6 +181,7 @@ type HostExecApprovalParams = {
   ask: ExecAsk;
   warningText?: string;
   commandSpans?: ExecApprovalCommandSpan[];
+  allowedDecisions?: readonly ExecApprovalDecision[];
   agentId?: string;
   resolvedPath?: string;
   sessionKey?: string;
@@ -253,6 +257,7 @@ async function buildHostApprovalDecisionParams(
     ask: params.ask,
     warningText: params.warningText,
     commandSpans,
+    allowedDecisions: params.allowedDecisions,
     ...buildExecApprovalRequesterContext({
       agentId: params.agentId,
       sessionKey: params.sessionKey,

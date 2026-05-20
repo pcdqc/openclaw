@@ -190,7 +190,8 @@ Durable `allow-always` trust does not bypass that rule: a chained command still 
 top-level segment to match.
 
 `autoAllowSkills` is a separate convenience path in exec approvals. It is not the same as
-manual path allowlist entries. For strict explicit trust, keep `autoAllowSkills` disabled.
+manual path allowlist entries. It applies to real skill executables only, not `cat SKILL.md`
+or `printf` preambles. For strict explicit trust, keep `autoAllowSkills` disabled.
 
 Use the two controls for different jobs:
 

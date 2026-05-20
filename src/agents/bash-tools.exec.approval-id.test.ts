@@ -360,6 +360,14 @@ function mockNoApprovalRouteRegistration() {
   });
 }
 
+function durableCommandPattern(commandText: string, cwd: string | null = null): string {
+  return `=command:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(["v1", commandText.trim(), cwd, null]))
+    .digest("hex")
+    .slice(0, 16)}`;
+}
+
 describe("exec approvals", () => {
   let previousHome: string | undefined;
   let previousUserProfile: string | undefined;
@@ -831,7 +839,7 @@ describe("exec approvals", () => {
       calls.push(method);
       if (method === "exec.approvals.node.get") {
         const prepared = buildPreparedSystemRunPayload({
-          params: { command: ["/bin/sh", "-lc", "cd ."], cwd: process.cwd() },
+          params: { command: ["/bin/sh", "-c", "cd ."], cwd: process.cwd() },
         }) as { payload?: { plan?: { commandText?: string } } };
         const commandText = prepared.payload?.plan?.commandText ?? "";
         return {
@@ -841,11 +849,7 @@ describe("exec approvals", () => {
               main: {
                 allowlist: [
                   {
-                    pattern: `=command:${crypto
-                      .createHash("sha256")
-                      .update(commandText)
-                      .digest("hex")
-                      .slice(0, 16)}`,
+                    pattern: durableCommandPattern(commandText, process.cwd()),
                     source: "allow-always",
                   },
                 ],
@@ -875,6 +879,7 @@ describe("exec approvals", () => {
 
     const result = await tool.execute("call-node-shell-wrapper-durable-allow-always", {
       command: "cd .",
+      workdir: process.cwd(),
     });
 
     expect(result.details.status).toBe("completed");
@@ -1208,7 +1213,7 @@ describe("exec approvals", () => {
     expect(calls).toContain("exec.approval.request");
   });
 
-  it("runs a skill wrapper chain without prompting when the wrapper is allowlisted", async () => {
+  it("runs a direct skill wrapper command without prompting when the wrapper is allowlisted", async () => {
     if (process.platform === "win32") {
       return;
     }
@@ -1245,13 +1250,68 @@ describe("exec approvals", () => {
       });
 
       const result = await tool.execute("call-skill-wrapper", {
-        command: `cat ${JSON.stringify(skillPath)} && printf '\\n---CMD---\\n' && ${JSON.stringify(wrapperPath)} calendar events primary --today --json`,
+        command: `${JSON.stringify(wrapperPath)} calendar events primary --today --json`,
         workdir: tempDir,
       });
 
       expect(result.details.status).toBe("completed");
       expect(getResultText(result)).toContain('{"events":[]}');
       expect(calls).not.toContain("exec.approval.request");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prompts for the old skill prelude chain even when the wrapper is allowlisted", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-skill-wrapper-"));
+    try {
+      const skillDir = path.join(tempDir, ".openclaw", "skills", "gog");
+      const skillPath = path.join(skillDir, "SKILL.md");
+      const binDir = path.join(tempDir, "bin");
+      const wrapperPath = path.join(binDir, "gog-wrapper");
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.mkdir(binDir, { recursive: true });
+      await fs.writeFile(skillPath, "# gog skill\n");
+      await fs.writeFile(wrapperPath, "#!/bin/sh\necho '{\"events\":[]}'\n");
+      await fs.chmod(wrapperPath, 0o755);
+
+      await writeExecApprovalsConfig({
+        version: 1,
+        defaults: { security: "allowlist", ask: "on-miss", askFallback: "deny" },
+        agents: {
+          main: {
+            allowlist: [{ pattern: wrapperPath }],
+          },
+        },
+      });
+
+      const calls: string[] = [];
+      vi.mocked(callGatewayTool).mockImplementation(async (method, _opts, params) => {
+        calls.push(method);
+        if (method === "exec.approval.request") {
+          return acceptedApprovalResponse(params);
+        }
+        return { ok: true };
+      });
+
+      const command = `cat ${JSON.stringify(skillPath)} && printf '\\n---CMD---\\n' && ${JSON.stringify(wrapperPath)} calendar events primary --today --json`;
+      const tool = createExecTool({
+        host: "gateway",
+        ask: "on-miss",
+        security: "allowlist",
+        approvalRunningNoticeMs: 0,
+      });
+
+      const result = await tool.execute("call-skill-wrapper-prelude", {
+        command,
+        workdir: tempDir,
+      });
+
+      expectPendingCommandText(result, command);
+      expect(calls).toContain("exec.approval.request");
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
@@ -1393,9 +1453,9 @@ describe("exec approvals", () => {
 
     let systemRunInvoke: unknown;
     const preparedPlan = {
-      argv: ["/bin/sh", "-lc", "echo cron-node-ok"],
+      argv: ["/bin/sh", "-c", "echo cron-node-ok"],
       cwd: null,
-      commandText: "/bin/sh -lc 'echo cron-node-ok'",
+      commandText: '/bin/sh -c "echo cron-node-ok"',
       commandPreview: "echo cron-node-ok",
       agentId: null,
       sessionKey: null,

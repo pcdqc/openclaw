@@ -5,5 +5,5 @@ export function buildNodeShellCommand(command: string, platform?: string | null)
   if (normalized.startsWith("win")) {
     return ["cmd.exe", "/d", "/s", "/c", command];
   }
-  return ["/bin/sh", "-lc", command];
+  return ["/bin/sh", "-c", command];
 }

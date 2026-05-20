@@ -19,7 +19,8 @@ enum ExecShellWrapperParser {
         let names: Set<String>
     }
 
-    private static let posixInlineFlags = Set(["-lc", "-c", "--command"])
+    private static let posixLongInlineFlags = Set(["--command"])
+    private static let posixLongOptionsWithValue = Set(["--init-file", "--rcfile", "--startup-script"])
     private static let powershellInlineFlags = Set(["-c", "-command", "--command"])
 
     private static let wrapperSpecs: [WrapperSpec] = [
@@ -72,12 +73,43 @@ enum ExecShellWrapperParser {
     }
 
     private static func extractPosixInlineCommand(_ command: [String]) -> String? {
-        let flag = command.count > 1 ? command[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-        guard self.posixInlineFlags.contains(flag.lowercased()) else {
-            return nil
+        var sawInlineCommandFlag = false
+        var index = 1
+        while index < command.count {
+            let token = command[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if token.isEmpty {
+                index += 1
+                continue
+            }
+            if token == "--" {
+                guard sawInlineCommandFlag, index + 1 < command.count else {
+                    return nil
+                }
+                return self.trimmedNonEmpty(command[index + 1])
+            }
+            if !token.hasPrefix("-"), !token.hasPrefix("+") {
+                return sawInlineCommandFlag ? token : nil
+            }
+            if token.hasPrefix("--") {
+                let optionName = self.optionName(token)
+                if self.posixLongInlineFlags.contains(optionName) {
+                    if let equals = token.firstIndex(of: "=") {
+                        return self.trimmedNonEmpty(String(token[token.index(after: equals)...]))
+                    }
+                    sawInlineCommandFlag = true
+                    index += 1
+                    continue
+                }
+                index += self.posixLongOptionsWithValue.contains(optionName) && !token.contains("=") ? 2 : 1
+                continue
+            }
+            let shortScan = self.readPosixShortOptionScan(token)
+            if shortScan.inline {
+                sawInlineCommandFlag = true
+            }
+            index += shortScan.consumesNextArg ? 2 : 1
         }
-        let payload = command.count > 2 ? command[2].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-        return payload.isEmpty ? nil : payload
+        return nil
     }
 
     private static func extractCmdInlineCommand(_ command: [String]) -> String? {
@@ -104,5 +136,38 @@ enum ExecShellWrapperParser {
             }
         }
         return nil
+    }
+
+    private static func optionName(_ token: String) -> String {
+        token.split(separator: "=", maxSplits: 1).first.map(String.init) ?? token
+    }
+
+    private static func trimmedNonEmpty(_ token: String?) -> String? {
+        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func readPosixShortOptionScan(_ token: String) -> (inline: Bool, consumesNextArg: Bool) {
+        guard (token.hasPrefix("-") || token.hasPrefix("+")),
+              !token.hasPrefix("--"),
+              !token.hasPrefix("++"),
+              token != "-",
+              token != "+"
+        else {
+            return (false, false)
+        }
+
+        var inline = false
+        var consumesNextArg = false
+        for flag in token.dropFirst() {
+            if token.hasPrefix("-"), flag == "c" {
+                inline = true
+                continue
+            }
+            if flag == "o" || flag == "O" {
+                consumesNextArg = true
+            }
+        }
+        return (inline, consumesNextArg)
     }
 }

@@ -5,8 +5,9 @@ import {
   unwrapDispatchWrappersForResolution,
   unwrapKnownShellMultiplexerInvocation,
 } from "./exec-wrapper-resolution.js";
+import { resolvePosixInlineCommandMatch } from "./posix-shell-options.js";
+import { isPowerShellOptionToken, powerShellOptionConsumesNextArg } from "./powershell-options.js";
 import {
-  POSIX_INLINE_COMMAND_FLAGS,
   POWERSHELL_INLINE_COMMAND_FLAGS,
   resolveInlineCommandMatch,
 } from "./shell-inline-command.js";
@@ -95,10 +96,12 @@ function hasTrailingPositionalArgvAfterInlineCommand(argv: string[]): boolean {
 
   const inlineCommandIndex =
     wrapper === "powershell" || wrapper === "pwsh"
-      ? resolveInlineCommandMatch(wrapperArgv, POWERSHELL_INLINE_COMMAND_FLAGS).valueTokenIndex
-      : resolveInlineCommandMatch(wrapperArgv, POSIX_INLINE_COMMAND_FLAGS, {
-          allowCombinedC: true,
-        }).valueTokenIndex;
+      ? resolveInlineCommandMatch(wrapperArgv, POWERSHELL_INLINE_COMMAND_FLAGS, {
+          isOptionToken: isPowerShellOptionToken,
+          optionConsumesNextArg: powerShellOptionConsumesNextArg,
+          stopAtFirstOperand: true,
+        }).valueTokenIndex
+      : resolvePosixInlineCommandMatch(wrapperArgv).valueTokenIndex;
   if (inlineCommandIndex === null) {
     return false;
   }

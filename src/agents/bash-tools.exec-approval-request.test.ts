@@ -281,4 +281,25 @@ describe("requestExecApprovalDecision", () => {
       expect.anything(),
     );
   });
+
+  it("passes explicit allowed decisions to approval registration", async () => {
+    vi.mocked(callGatewayTool).mockResolvedValue({ id: "approval-id", expiresAtMs: 1234 });
+
+    await registerExecApprovalRequestForHost({
+      approvalId: "approval-id",
+      command: "echo hi",
+      workdir: "/tmp/project",
+      host: "gateway",
+      security: "allowlist",
+      ask: "on-miss",
+      allowedDecisions: ["allow-once", "deny"],
+    });
+
+    expect(callGatewayTool).toHaveBeenCalledWith(
+      "exec.approval.request",
+      expect.anything(),
+      expect.objectContaining({ allowedDecisions: ["allow-once", "deny"] }),
+      expect.anything(),
+    );
+  });
 });

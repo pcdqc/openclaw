@@ -74,6 +74,8 @@ const SUDO_STANDALONE_OPTIONS = new Set([
   "--shell",
   "--stdin",
 ]);
+const SUDO_SHELL_STARTUP_CONTEXT_OPTIONS = new Set(["-i", "--login", "-s", "--shell"]);
+const SUDO_ENVIRONMENT_CONTEXT_OPTIONS = new Set(["-E", "--preserve-env"]);
 const SUDO_NON_EXEC_OPTIONS = new Set([
   "-K",
   "-l",
@@ -89,6 +91,7 @@ const SUDO_NON_EXEC_OPTIONS = new Set([
 ]);
 const DOAS_OPTIONS_WITH_VALUE = new Set(["-a", "-C", "-u"]);
 const DOAS_STANDALONE_OPTIONS = new Set(["-L", "-n", "-s"]);
+const DOAS_SHELL_STARTUP_CONTEXT_OPTIONS = new Set(["-s"]);
 const EXEC_OPTIONS_WITH_VALUE = new Set(["-a"]);
 const EXEC_STANDALONE_OPTIONS = new Set(["-c", "-l"]);
 
@@ -172,18 +175,35 @@ function knownCarrierOptionConsumesNextValue(
   return consumesNextValue;
 }
 
-function stripSudoEnvAssignmentsFromCommandArgv(
+type SudoCommandArgvResolution = {
+  argv: string[];
+  environmentContextSeen: boolean;
+  shellStartupContext: boolean;
+};
+
+function stripSudoEnvAssignmentsFromCommandArgvWithMetadata(
   executable: string,
   argv: string[],
-): string[] | null {
+  environmentContextSeen: boolean,
+  shellStartupContext: boolean,
+): SudoCommandArgvResolution | null {
   if (executable !== "sudo") {
-    return argv.length > 0 ? argv : null;
+    return argv.length > 0 ? { argv, environmentContextSeen, shellStartupContext } : null;
   }
   let index = 0;
   while (index < argv.length && isEnvAssignmentToken(argv[index] ?? "")) {
     index += 1;
   }
-  return index < argv.length ? argv.slice(index) : null;
+  if (index < argv.length) {
+    return {
+      argv: argv.slice(index),
+      environmentContextSeen: environmentContextSeen || index > 0,
+      shellStartupContext,
+    };
+  }
+  return shellStartupContext
+    ? { argv: [], environmentContextSeen: environmentContextSeen || index > 0, shellStartupContext }
+    : null;
 }
 
 function findParsedCarrierOption(
@@ -213,6 +233,35 @@ export type ParsedEnvInvocationPrelude = {
   usesModifiers: boolean;
 };
 
+function parseEnvCommandAfterAssignments(params: {
+  argv: string[];
+  startIndex: number;
+  assignmentKeys: string[];
+  usesModifiers: boolean;
+}): ParsedEnvInvocationPrelude | null {
+  let usesModifiers = params.usesModifiers;
+  for (let index = params.startIndex; index < params.argv.length; index += 1) {
+    const token = params.argv[index] ?? "";
+    if (!token) {
+      return null;
+    }
+    if (isEnvAssignmentToken(token)) {
+      usesModifiers = true;
+      const delimiter = token.indexOf("=");
+      if (delimiter > 0) {
+        params.assignmentKeys.push(token.slice(0, delimiter));
+      }
+      continue;
+    }
+    return {
+      assignmentKeys: params.assignmentKeys,
+      commandIndex: index,
+      usesModifiers,
+    };
+  }
+  return null;
+}
+
 export function parseEnvInvocationPrelude(
   argv: string[],
   depth = 0,
@@ -235,10 +284,17 @@ export function parseEnvInvocationPrelude(
       }
       continue;
     }
-    if (token === "--" || token === "-") {
-      return index + 1 < argv.length
-        ? { assignmentKeys, commandIndex: index + 1, usesModifiers }
-        : null;
+    if (token === "--") {
+      return parseEnvCommandAfterAssignments({
+        argv,
+        startIndex: index + 1,
+        assignmentKeys,
+        usesModifiers,
+      });
+    }
+    if (token === "-") {
+      usesModifiers = true;
+      continue;
     }
     if (token.startsWith("-")) {
       const option = parseCarrierOptionToken(token, ENV_STANDALONE_OPTIONS, ENV_OPTIONS_WITH_VALUE);
@@ -314,7 +370,7 @@ function resolveCommandBuiltinCarriedArgv(argv: string[]): string[] | null {
   return null;
 }
 
-function resolveSudoLikeCarriedArgv(argv: string[]): string[] | null {
+function resolveSudoLikeCarriedArgvWithMetadata(argv: string[]): SudoCommandArgvResolution | null {
   const executable = normalizeExecutableToken(argv[0] ?? "");
   const standaloneOptions =
     executable === "sudo"
@@ -331,13 +387,25 @@ function resolveSudoLikeCarriedArgv(argv: string[]): string[] | null {
   if (!standaloneOptions || !optionsWithValue) {
     return null;
   }
+  let environmentContextSeen = false;
+  let shellStartupContext = false;
   for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index] ?? "";
     if (token === "--") {
-      return stripSudoEnvAssignmentsFromCommandArgv(executable, argv.slice(index + 1));
+      return stripSudoEnvAssignmentsFromCommandArgvWithMetadata(
+        executable,
+        argv.slice(index + 1),
+        environmentContextSeen,
+        shellStartupContext,
+      );
     }
     if (!token.startsWith("-")) {
-      return stripSudoEnvAssignmentsFromCommandArgv(executable, argv.slice(index));
+      return stripSudoEnvAssignmentsFromCommandArgvWithMetadata(
+        executable,
+        argv.slice(index),
+        environmentContextSeen,
+        shellStartupContext,
+      );
     }
     const option = parseCarrierOptionToken(
       token,
@@ -356,6 +424,67 @@ function resolveSudoLikeCarriedArgv(argv: string[]): string[] | null {
     if (consumeNextValue === null) {
       return null;
     }
+    if (
+      executable === "sudo" &&
+      option.some((parsed) => SUDO_ENVIRONMENT_CONTEXT_OPTIONS.has(parsed.name))
+    ) {
+      environmentContextSeen = true;
+    }
+    const shellStartupOptions =
+      executable === "sudo"
+        ? SUDO_SHELL_STARTUP_CONTEXT_OPTIONS
+        : DOAS_SHELL_STARTUP_CONTEXT_OPTIONS;
+    if (option.some((parsed) => shellStartupOptions.has(parsed.name))) {
+      shellStartupContext = true;
+    }
+    if (consumeNextValue) {
+      index += 1;
+    }
+  }
+  return shellStartupContext ? { argv: [], environmentContextSeen, shellStartupContext } : null;
+}
+
+function resolveSudoLikeCarriedArgv(argv: string[]): string[] | null {
+  const resolution = resolveSudoLikeCarriedArgvWithMetadata(argv);
+  return resolution && resolution.argv.length > 0 ? resolution.argv : null;
+}
+
+export function hasSudoEnvAssignmentsBeforeCarriedCommand(argv: string[]): boolean {
+  return resolveSudoLikeCarriedArgvWithMetadata(argv)?.environmentContextSeen ?? false;
+}
+
+export function hasSudoShellStartupContextBeforeCarriedCommand(argv: string[]): boolean {
+  return resolveSudoLikeCarriedArgvWithMetadata(argv)?.shellStartupContext ?? false;
+}
+
+type ExecCarriedArgvResolution = {
+  argv: string[];
+  argv0Changed: boolean;
+};
+
+function resolveExecCarriedArgvWithMetadata(
+  argv: readonly string[],
+): ExecCarriedArgvResolution | null {
+  if (normalizeExecutableToken(argv[0] ?? "") !== "exec") {
+    return null;
+  }
+  let argv0Changed = false;
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token === "--") {
+      return { argv: argv.slice(index + 1), argv0Changed };
+    }
+    if (!token.startsWith("-")) {
+      return { argv: argv.slice(index), argv0Changed };
+    }
+    const option = parseCarrierOptionToken(token, EXEC_STANDALONE_OPTIONS, EXEC_OPTIONS_WITH_VALUE);
+    if (!option) {
+      return null;
+    }
+    if (option.some((parsed) => parsed.name === "-a" || parsed.name === "-l")) {
+      argv0Changed = true;
+    }
+    const consumeNextValue = knownCarrierOptionConsumesNextValue(option, EXEC_OPTIONS_WITH_VALUE);
     if (consumeNextValue) {
       index += 1;
     }
@@ -364,27 +493,7 @@ function resolveSudoLikeCarriedArgv(argv: string[]): string[] | null {
 }
 
 function resolveExecCarriedArgv(argv: string[]): string[] | null {
-  if (normalizeExecutableToken(argv[0] ?? "") !== "exec") {
-    return null;
-  }
-  for (let index = 1; index < argv.length; index += 1) {
-    const token = argv[index] ?? "";
-    if (token === "--") {
-      return argv.slice(index + 1);
-    }
-    if (!token.startsWith("-")) {
-      return argv.slice(index);
-    }
-    const option = parseCarrierOptionToken(token, EXEC_STANDALONE_OPTIONS, EXEC_OPTIONS_WITH_VALUE);
-    if (!option) {
-      return null;
-    }
-    const consumeNextValue = knownCarrierOptionConsumesNextValue(option, EXEC_OPTIONS_WITH_VALUE);
-    if (consumeNextValue) {
-      index += 1;
-    }
-  }
-  return null;
+  return resolveExecCarriedArgvWithMetadata(argv)?.argv ?? null;
 }
 
 export function resolveCarrierCommandArgv(

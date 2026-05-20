@@ -20,11 +20,14 @@ import {
 } from "../config/runtime-snapshot.js";
 import type { SystemRunApprovalPlan } from "../infra/exec-approvals.js";
 import {
+  addDurableCommandApproval,
+  ensureExecApprovals,
   loadExecApprovals,
   resolveExecApprovalsPath,
   saveExecApprovals,
 } from "../infra/exec-approvals.js";
 import type { ExecHostResponse } from "../infra/exec-host.js";
+import { formatExecCommand } from "../infra/system-run-command.js";
 import { buildSystemRunApprovalPlan } from "./invoke-system-run-plan.js";
 import { handleSystemRunInvoke } from "./invoke-system-run.js";
 import type { HandleSystemRunInvokeOptions } from "./invoke-system-run.js";
@@ -32,6 +35,14 @@ import type { HandleSystemRunInvokeOptions } from "./invoke-system-run.js";
 vi.mock("../logger.js", () => ({
   logWarn: vi.fn(),
 }));
+
+function durableCommandPattern(commandText: string, cwd: string | null = null): string {
+  return `=command:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(["v1", commandText.trim(), cwd, null]))
+    .digest("hex")
+    .slice(0, 16)}`;
+}
 
 type MockedRunCommand = Mock<HandleSystemRunInvokeOptions["runCommand"]>;
 type MockedRunViaMacAppExecHost = Mock<HandleSystemRunInvokeOptions["runViaMacAppExecHost"]>;
@@ -1101,6 +1112,18 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
         details: ["SHELLOPTS", "PS4"],
       },
       {
+        label: "blocked argv assignment after env separator",
+        command: ["/usr/bin/env", "--", "BASH_ENV=/tmp/payload", "bash", "-c", "echo ok"],
+        message: "SYSTEM_RUN_DENIED: command env assignment rejected",
+        details: ["BASH_ENV"],
+      },
+      {
+        label: "blocked argv assignment after env dash",
+        command: ["/usr/bin/env", "-", "BASH_ENV=/tmp/payload", "bash", "-c", "echo ok"],
+        message: "SYSTEM_RUN_DENIED: command env assignment rejected",
+        details: ["BASH_ENV"],
+      },
+      {
         label: "invalid override key",
         env: { "BAD-KEY": "x" },
         message: "SYSTEM_RUN_DENIED: environment override rejected",
@@ -1445,8 +1468,8 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
         run: async () => {
           const invoke = await runSystemInvoke({
             preferMacAppExecHost: false,
-            command: ["/bin/sh", "-lc", "./scripts/check_mail.sh --limit 5"],
-            rawCommand: '/bin/sh -lc "./scripts/check_mail.sh --limit 5"',
+            command: ["/bin/sh", "-c", "./scripts/check_mail.sh --limit 5"],
+            rawCommand: '/bin/sh -c "./scripts/check_mail.sh --limit 5"',
             cwd: tempDir,
             security: "allowlist",
             ask: "on-miss",
@@ -1457,6 +1480,194 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
           expectInvokeOk(invoke.sendInvokeResult, {
             payloadContains: "shell-wrapper-inner-ok",
           });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "requires approval for allowlisted inner scripts through startup shell wrappers",
+    async () => {
+      const tempDir = createFixtureDir("openclaw-shell-wrapper-startup-");
+      const scriptsDir = path.join(tempDir, "scripts");
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      const scriptPath = path.join(scriptsDir, "check_mail.sh");
+      fs.writeFileSync(scriptPath, "#!/bin/sh\necho ok\n");
+      fs.chmodSync(scriptPath, 0o755);
+
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: scriptPath }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["/bin/sh", "-lc", "./scripts/check_mail.sh --limit 5"],
+            rawCommand: '/bin/sh -lc "./scripts/check_mail.sh --limit 5"',
+            cwd: tempDir,
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("shell-wrapper-inner-ok")),
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "requires approval when shell payload flags follow script operands",
+    async () => {
+      const tempDir = createFixtureDir("openclaw-shell-wrapper-script-first-");
+      const scriptPath = path.join(tempDir, "evil.sh");
+      fs.writeFileSync(scriptPath, "#!/bin/sh\necho evil\n");
+      fs.chmodSync(scriptPath, 0o755);
+
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: "/bin/echo" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["bash", "./evil.sh", "-c", "/bin/echo ok"],
+            cwd: tempDir,
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("hidden-payload-ok")),
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "requires approval for allowlisted inner commands through PowerShell profiles",
+    async () => {
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: "/bin/echo" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["pwsh", "-Command", "/bin/echo ok"],
+            rawCommand: 'pwsh -Command "/bin/echo ok"',
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("powershell-profile-ok")),
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "requires approval when PowerShell NoProfile is an option operand",
+    async () => {
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: "/bin/echo" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["pwsh", "-WorkingDirectory", "-NoProfile", "--command=/bin/echo ok"],
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("powershell-profile-ok")),
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "allows allowlisted PowerShell --command payloads when profiles are disabled",
+    async () => {
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: "/bin/echo" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["pwsh", "-NoProfile", "--command=/bin/echo ok"],
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("powershell-noprofile-ok")),
+          });
+
+          expect(invoke.runCommand).toHaveBeenCalledTimes(1);
+          expectInvokeOk(invoke.sendInvokeResult, { payloadContains: "powershell-noprofile-ok" });
+        },
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "does not persist allow-always approvals for startup shell payload wrappers",
+    async () => {
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals(),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["/bin/sh", "-c", 'bash -lc "/bin/echo ok"'],
+            rawCommand: '/bin/sh -c "bash -lc \\"/bin/echo ok\\""',
+            security: "allowlist",
+            ask: "on-miss",
+            approvalDecision: "allow-always",
+            approved: true,
+            runCommand: vi.fn(async () => createLocalRunResult("startup-shell-ok")),
+          });
+
+          expect(invoke.runCommand).toHaveBeenCalledTimes(1);
+          expectInvokeOk(invoke.sendInvokeResult, { payloadContains: "startup-shell-ok" });
+          expect(loadExecApprovals().agents?.main?.allowlist ?? []).toEqual([]);
         },
       });
     },
@@ -1523,6 +1734,50 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     }
   });
 
+  it("does not reuse durable inner approvals for cmd.exe AutoRun contexts", async () => {
+    const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      const tempDir = createFixtureDir("openclaw-cmd-wrapper-durable-");
+      const scriptPath = path.join(tempDir, "check_mail.cmd");
+      fs.writeFileSync(scriptPath, "@echo off\r\necho ok\r\n");
+
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: scriptPath, source: "allow-always" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: ["cmd.exe", "/c", `${scriptPath} --limit 5`],
+            cwd: tempDir,
+            security: "allowlist",
+            ask: "on-miss",
+            isCmdExeInvocation: (argv) => {
+              const token = argv[0]?.trim();
+              if (!token) {
+                return false;
+              }
+              const base = path.win32.basename(token).toLowerCase();
+              return base === "cmd.exe" || base === "cmd";
+            },
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
   it("reuses exact-command durable trust for shell-wrapper reruns", async () => {
     if (process.platform === "win32") {
       return;
@@ -1530,13 +1785,14 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
 
     const tempDir = createFixtureDir("openclaw-shell-wrapper-allow-");
     const prepared = buildSystemRunApprovalPlan({
-      command: ["/bin/sh", "-lc", "cd ."],
+      command: ["/bin/sh", "-c", "cd ."],
       cwd: tempDir,
     });
     expect(prepared.ok).toBe(true);
     if (!prepared.ok) {
       throw new Error("unreachable");
     }
+    const approvalCwd = prepared.plan.cwd ?? tempDir;
 
     await withTempApprovalsHome({
       approvals: {
@@ -1546,11 +1802,7 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
           main: {
             allowlist: [
               {
-                pattern: `=command:${crypto
-                  .createHash("sha256")
-                  .update(prepared.plan.commandText)
-                  .digest("hex")
-                  .slice(0, 16)}`,
+                pattern: durableCommandPattern(prepared.plan.commandText, approvalCwd),
                 source: "allow-always",
               },
             ],
@@ -1558,12 +1810,15 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
         },
       },
       run: async () => {
+        addDurableCommandApproval(ensureExecApprovals(), "main", prepared.plan.commandText, {
+          cwd: approvalCwd,
+        });
         const rerun = await runSystemInvoke({
           preferMacAppExecHost: false,
           command: prepared.plan.argv,
           rawCommand: prepared.plan.commandText,
           systemRunPlan: prepared.plan,
-          cwd: prepared.plan.cwd ?? tempDir,
+          cwd: approvalCwd,
           security: "allowlist",
           ask: "on-miss",
           runCommand: vi.fn(async () => createLocalRunResult("shell-wrapper-reused")),
@@ -1573,5 +1828,241 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
         expectInvokeOk(rerun.sendInvokeResult, { payloadContains: "shell-wrapper-reused" });
       },
     });
+  });
+
+  it("allows PowerShell command payload args that look like host file flags", async () => {
+    const command = ["pwsh", "-NoProfile", "-Command", "/bin/echo", "-File"];
+    await withTempApprovalsHome({
+      approvals: createAllowlistOnMissApprovals({
+        agents: {
+          main: {
+            allowlist: [{ pattern: "/bin/echo" }],
+          },
+        },
+      }),
+      run: async () => {
+        const invoke = await runSystemInvoke({
+          preferMacAppExecHost: false,
+          command,
+          rawCommand: formatExecCommand(command),
+          security: "allowlist",
+          ask: "on-miss",
+          runCommand: vi.fn(async () => createLocalRunResult("powershell-command-arg")),
+        });
+
+        expect(invoke.runCommand).toHaveBeenCalledWith(command, undefined, undefined, undefined);
+        expectInvokeOk(invoke.sendInvokeResult, {
+          payloadContains: "powershell-command-arg",
+        });
+      },
+    });
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "requires approval for trailing PowerShell command argv chains",
+    async () => {
+      const command = ["pwsh", "-NoProfile", "-Command", "/bin/echo", ";", "/bin/id"];
+      await withTempApprovalsHome({
+        approvals: createAllowlistOnMissApprovals({
+          agents: {
+            main: {
+              allowlist: [{ pattern: "/bin/echo" }],
+            },
+          },
+        }),
+        run: async () => {
+          const invoke = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command,
+            rawCommand: formatExecCommand(command),
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("powershell-chain-ok")),
+          });
+
+          expect(invoke.runCommand).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: invoke.sendNodeEvent,
+            sendInvokeResult: invoke.sendInvokeResult,
+          });
+        },
+      });
+    },
+  );
+
+  it("ignores exact-command durable trust for startup shell wrappers", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    for (const testCase of [
+      {
+        name: "transport startup shell",
+        command: ["/bin/sh", "-lc", "echo ok"],
+        commandText: '/bin/sh -lc "echo ok"',
+      },
+      {
+        name: "nested startup shell payload",
+        command: ["/bin/sh", "-c", 'bash -lc "echo ok"'],
+        commandText: '/bin/sh -c "bash -lc \\"echo ok\\""',
+      },
+      {
+        name: "readonly exported startup env before nested shell",
+        command: ["zsh", "-fc", 'readonly -x BASH_ENV=/tmp/payload && bash -c "echo ok"'],
+        commandText: formatExecCommand([
+          "zsh",
+          "-fc",
+          'readonly -x BASH_ENV=/tmp/payload && bash -c "echo ok"',
+        ]),
+      },
+      {
+        name: "powershell login before NoProfile",
+        command: ["pwsh", "-Login", "-NoProfile", "-Command", "/bin/echo ok"],
+        commandText: 'pwsh -Login -NoProfile -Command "/bin/echo ok"',
+      },
+      {
+        name: "powershell abbreviated encoded command with profiles",
+        command: ["pwsh", "-en", "VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABvAGsA"],
+        commandText: "pwsh -en VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABvAGsA",
+      },
+      {
+        name: "direct startup script wrapper",
+        command: ["bash", "--login", "./run.sh"],
+        commandText: "bash --login ./run.sh",
+      },
+      {
+        name: "transparent wrapped startup script wrapper",
+        command: ["/usr/bin/env", "bash", "--login", "./run.sh"],
+        commandText: "/usr/bin/env bash --login ./run.sh",
+      },
+      {
+        name: "env-manipulated shell script wrapper",
+        command: ["/usr/bin/env", "FOO=bar", "bash", "./run.sh"],
+        commandText: "/usr/bin/env FOO=bar bash ./run.sh",
+      },
+      {
+        name: "env separator assignment shell wrapper",
+        command: ["/usr/bin/env", "--", "FOO=bar", "bash", "-c", "echo ok"],
+        commandText: '/usr/bin/env -- FOO=bar bash -c "echo ok"',
+      },
+      {
+        name: "env dash assignment shell wrapper",
+        command: ["/usr/bin/env", "-", "FOO=bar", "bash", "-c", "echo ok"],
+        commandText: '/usr/bin/env - FOO=bar bash -c "echo ok"',
+      },
+      {
+        name: "unanalyzable shell payload",
+        command: ["/bin/sh", "-c", "echo \\\n ok"],
+        commandText: formatExecCommand(["/bin/sh", "-c", "echo \\\n ok"]),
+      },
+      {
+        name: "startup shell after earlier chain miss",
+        command: ["/bin/sh", "-c", 'export FOO=bar && bash -lc "echo ok"'],
+        commandText: formatExecCommand(["/bin/sh", "-c", 'export FOO=bar && bash -lc "echo ok"']),
+      },
+      {
+        name: "assignment-prefixed shell wrapper",
+        command: ["/bin/sh", "-c", 'BASH_ENV=/tmp/payload bash -c "echo ok"'],
+        commandText: formatExecCommand([
+          "/bin/sh",
+          "-c",
+          'BASH_ENV=/tmp/payload bash -c "echo ok"',
+        ]),
+      },
+      {
+        name: "positional shell carrier",
+        command: ["/bin/sh", "-c", '$0 "$1"', "touch", "/tmp/marker"],
+        commandText: formatExecCommand(["/bin/sh", "-c", '$0 "$1"', "touch", "/tmp/marker"]),
+      },
+      {
+        name: "command-carried startup shell",
+        command: ["command", "bash", "-lc", "echo ok"],
+        commandText: 'command bash -lc "echo ok"',
+      },
+      {
+        name: "command-carried nested startup shell",
+        command: ["command", "sh", "-c", 'bash -lc "echo ok"'],
+        commandText: formatExecCommand(["command", "sh", "-c", 'bash -lc "echo ok"']),
+      },
+      {
+        name: "sudo-carried startup shell",
+        command: ["sudo", "bash", "-lc", "echo ok"],
+        commandText: 'sudo bash -lc "echo ok"',
+      },
+      {
+        name: "sudo preserve-env carried shell",
+        command: ["sudo", "-E", "bash", "-c", "echo ok"],
+        commandText: 'sudo -E bash -c "echo ok"',
+      },
+      {
+        name: "sudo preserve named env carried shell",
+        command: ["sudo", "--preserve-env=BASH_ENV", "bash", "-c", "echo ok"],
+        commandText: 'sudo --preserve-env=BASH_ENV bash -c "echo ok"',
+      },
+      {
+        name: "sudo login shell without carried command",
+        command: ["sudo", "-i"],
+        commandText: "sudo -i",
+      },
+      {
+        name: "sudo shell without carried command",
+        command: ["sudo", "-s"],
+        commandText: "sudo -s",
+      },
+      {
+        name: "doas shell without carried command",
+        command: ["doas", "-s"],
+        commandText: "doas -s",
+      },
+      {
+        name: "sudo-carried nested startup shell",
+        command: ["sudo", "sh", "-c", 'bash -lc "echo ok"'],
+        commandText: formatExecCommand(["sudo", "sh", "-c", 'bash -lc "echo ok"']),
+      },
+      {
+        name: "sudo assignment-carried shell wrapper",
+        command: ["sudo", "BASH_ENV=/tmp/payload", "bash", "-c", "echo ok"],
+        commandText: 'sudo BASH_ENV=/tmp/payload bash -c "echo ok"',
+      },
+      {
+        name: "carrier env-manipulated shell wrapper",
+        command: ["sudo", "env", "BASH_ENV=/tmp/payload", "bash", "-c", "echo ok"],
+        commandText: 'sudo env BASH_ENV=/tmp/payload bash -c "echo ok"',
+      },
+    ]) {
+      await withTempApprovalsHome({
+        approvals: {
+          version: 1,
+          defaults: { security: "allowlist", ask: "on-miss", askFallback: "full" },
+          agents: {
+            main: {
+              allowlist: [
+                {
+                  pattern: durableCommandPattern(testCase.commandText, process.cwd()),
+                  source: "allow-always",
+                },
+              ],
+            },
+          },
+        },
+        run: async () => {
+          const rerun = await runSystemInvoke({
+            preferMacAppExecHost: false,
+            command: testCase.command,
+            rawCommand: testCase.commandText,
+            cwd: process.cwd(),
+            security: "allowlist",
+            ask: "on-miss",
+            runCommand: vi.fn(async () => createLocalRunResult("startup-shell-reused")),
+          });
+
+          expect(rerun.runCommand, testCase.name).not.toHaveBeenCalled();
+          expectApprovalRequiredDenied({
+            sendNodeEvent: rerun.sendNodeEvent,
+            sendInvokeResult: rerun.sendInvokeResult,
+          });
+        },
+      });
+    }
   });
 });

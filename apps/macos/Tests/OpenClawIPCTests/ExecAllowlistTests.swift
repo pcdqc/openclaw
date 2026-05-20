@@ -110,8 +110,172 @@ struct ExecAllowlistTests {
         #expect(match?.pattern == entry.pattern)
     }
 
+    @Test func `exact command durable approval pattern matches command text`() {
+        let command = #"/bin/sh -c "set -e""#
+        let pattern = ExecApprovalHelpers.durableCommandApprovalPattern(
+            command,
+            cwd: "/tmp/project-a",
+            env: ["SAFE": "1"])
+
+        #expect(pattern == "=command:3535a6df690905a7")
+
+        let match = ExecApprovalHelpers.exactCommandDurableApprovalMatch(
+            entries: [
+                ExecAllowlistEntry(pattern: pattern ?? "", source: "allow-always"),
+                ExecAllowlistEntry(pattern: "/usr/bin/echo"),
+            ],
+            commandText: command,
+            cwd: "/tmp/project-a",
+            env: ["SAFE": "1"])
+
+        #expect(match?.pattern == pattern)
+        #expect(ExecApprovalHelpers.exactCommandDurableApprovalMatch(
+            entries: [ExecAllowlistEntry(pattern: pattern ?? "", source: "allow-always")],
+            commandText: command,
+            cwd: "/tmp/project-b",
+            env: ["SAFE": "1"]) == nil)
+        #expect(ExecApprovalHelpers.exactCommandDurableApprovalMatch(
+            entries: [ExecAllowlistEntry(pattern: pattern ?? "", source: "allow-always")],
+            commandText: command,
+            cwd: "/tmp/project-a",
+            env: ["SAFE": "2"]) == nil)
+    }
+
+    @Test func `exact command durable approval pattern matches js json bytes for absolute cwd`() {
+        let pattern = ExecApprovalHelpers.durableCommandApprovalPattern(
+            #"/bin/sh -c "set -e""#,
+            cwd: "/Users/example/project",
+            env: ["SAFE": "1", "LC_ALL": "C"])
+
+        #expect(pattern == "=command:02416b0db25b6ec7")
+    }
+
+    @Test func `normalize incoming drops legacy plaintext command text`() throws {
+        let normalized = ExecApprovalsStore.normalizeIncoming(ExecApprovalsFile(
+            version: 1,
+            socket: nil,
+            defaults: nil,
+            agents: [
+                "main": ExecApprovalsAgent(
+                    allowlist: [
+                        ExecAllowlistEntry(
+                            pattern: "=command:test",
+                            source: "allow-always",
+                            commandText: "echo secret-token"),
+                    ]),
+            ]))
+
+        let entry = normalized.agents?["main"]?.allowlist?.first
+        #expect(entry?.pattern == "=command:test")
+        #expect(entry?.source == "allow-always")
+        #expect(entry?.commandText == nil)
+
+        let data = try JSONEncoder().encode(normalized)
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(!json.contains("commandText"))
+        #expect(!json.contains("secret-token"))
+    }
+
+    @Test func `exact command durable approval binds canonical shell argv instead of legacy raw text`() async {
+        let stateDir = FileManager().temporaryDirectory
+            .appendingPathComponent("openclaw-exact-command-\(UUID().uuidString)", isDirectory: true)
+
+        await TestIsolation.withEnvValues(["OPENCLAW_STATE_DIR": stateDir.path]) {
+            let command = ["/tmp/bash", "-c", "cd ."]
+            let legacyRaw = "cd ."
+            let legacyPattern = ExecApprovalHelpers.durableCommandApprovalPattern(legacyRaw)
+            let canonicalCommand = ExecCommandFormatter.displayString(for: command)
+
+            #expect(canonicalCommand != legacyRaw)
+            ExecApprovalsStore.saveFile(ExecApprovalsFile(
+                version: 1,
+                socket: nil,
+                defaults: ExecApprovalsDefaults(security: .allowlist, ask: .onMiss),
+                agents: [
+                    "main": ExecApprovalsAgent(
+                        allowlist: [ExecAllowlistEntry(pattern: legacyPattern ?? "", source: "allow-always")]),
+                ]))
+
+            let evaluation = await ExecApprovalEvaluator.evaluate(
+                command: command,
+                rawCommand: legacyRaw,
+                cwd: nil,
+                envOverrides: nil,
+                agentId: "main")
+
+            #expect(evaluation.displayCommand == canonicalCommand)
+            #expect(evaluation.exactCommandDurableApprovalAllowed)
+            #expect(!evaluation.allowlistSatisfied)
+            #expect(evaluation.allowlistMatch == nil)
+        }
+    }
+
+    @Test func `exact command durable approval rejects unsafe shell payloads`() {
+        for command in [
+            ["/bin/sh", "-c", "echo $(/usr/bin/id)"],
+            ["/bin/sh", "-c", "echo \"ok `/usr/bin/id`\""],
+            ["/usr/bin/env", "BASH_ENV=/tmp/payload.sh", "bash", "-c", "echo ok"],
+            ["/bin/sh", "-c", "$0 \"$1\"", "touch", "marker"],
+            ["BASH_ENV=/tmp/payload.sh", "bash", "-c", "echo ok"],
+            ["pwsh", "-Command", "echo ok"],
+            ["pwsh", "-EncodedCommand", "ZQBjAGgAbwAgAG8AawA="],
+            ["fish", "-c", "echo ok"],
+            ["zsh", "-c", "echo ok"],
+            ["/bin/sh", "-c", #"export BASH_ENV=/tmp/payload && bash -c "echo ok""#],
+            ["/bin/sh", "-c", #"unset BASH_ENV && bash -c "echo ok""#],
+            ["/bin/sh", "-c", #"BASH_ENV=/tmp/payload command bash -c "echo ok""#],
+            ["/bin/sh", "-c", #"BASH_ENV=/tmp/payload exec bash -c "echo ok""#],
+            ["cmd.exe", "/c", "echo ok"],
+            ["command", "bash", "-lc", "echo ok"],
+            ["sudo", "bash", "-c", "echo ok"],
+            ["sudo", "sh", "-c", "echo ok"],
+            ["sudo", "bash", "-lc", "echo ok"],
+            ["sudo", "-E", "bash", "-c", "echo ok"],
+            ["sudo", "-i"],
+            ["doas", "sh", "-c", "echo ok"],
+            ["exec", "-c", "bash", "-c", "echo ok"],
+            ["BASH_ENV=/tmp/payload.sh", "zsh", "-f", "-c", "echo ok"],
+            ["zsh", "-f", "-c", "echo $(/usr/bin/id)"],
+            ["pwsh", "--", "./script.ps1"],
+            ["pwsh", "./script.ps1"],
+            ["pwsh", "-Fi", "./script.ps1"],
+            ["pwsh", "/File", "./script.ps1"],
+        ] {
+            #expect(!ExecCommandResolution.allowsExactCommandDurableApproval(
+                command: command,
+                cwd: nil,
+                env: ["PATH": "/usr/bin:/bin"]))
+        }
+    }
+
+    @Test func `exact command durable approval accepts profile-suppressed shell payloads`() {
+        for command in [
+            ["/bin/bash", "-c", "echo ok"],
+            ["pwsh", "-NoProfile", "-Command", "echo ok"],
+            ["pwsh", "-NoProfile", "-EncodedCommand", "ZQBjAGgAbwAgAG8AawA="],
+            ["fish", "-N", "-c", "echo ok"],
+            ["zsh", "-f", "-c", "echo ok"],
+            ["cmd.exe", "/d", "/c", "echo ok"],
+            ["command", "/bin/bash", "-c", "echo ok"],
+        ] {
+            #expect(ExecCommandResolution.allowsExactCommandDurableApproval(
+                command: command,
+                cwd: nil,
+            env: ["PATH": "/usr/bin:/bin"]))
+        }
+    }
+
+    @Test func `allow always patterns unwrap option prefixed POSIX shell payloads`() {
+        let patterns = ExecCommandResolution.resolveAllowAlwaysPatterns(
+            command: ["zsh", "-f", "-c", "/usr/bin/printf ok"],
+            cwd: nil,
+            env: ["PATH": "/usr/bin:/bin"])
+
+        #expect(patterns == ["/usr/bin/printf"])
+    }
+
     @Test func `resolve for allowlist splits shell chains`() {
-        let command = ["/bin/sh", "-lc", "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test"]
+        let command = ["/bin/sh", "-c", "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test"]
         let resolutions = ExecCommandResolution.resolveForAllowlist(
             command: command,
             rawCommand: "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test",
@@ -123,8 +287,8 @@ struct ExecAllowlistTests {
     }
 
     @Test func `resolve for allowlist uses wrapper argv payload even with canonical raw command`() {
-        let command = ["/bin/sh", "-lc", "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test"]
-        let canonicalRaw = "/bin/sh -lc \"echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test\""
+        let command = ["/bin/sh", "-c", "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test"]
+        let canonicalRaw = "/bin/sh -c \"echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test\""
         let resolutions = ExecCommandResolution.resolveForAllowlist(
             command: command,
             rawCommand: canonicalRaw,
@@ -133,6 +297,21 @@ struct ExecAllowlistTests {
         #expect(resolutions.count == 2)
         #expect(resolutions[0].executableName == "echo")
         #expect(resolutions[1].executableName == "touch")
+    }
+
+    @Test func `resolve for allowlist rejects unsafe shell transport wrappers`() {
+        for command in [
+            ["/bin/bash", "-lc", "/usr/bin/echo ok"],
+            ["pwsh", "-Command", "/usr/bin/echo ok"],
+            ["pwsh", "./script.ps1", "-Command", "Get-Date"],
+        ] {
+            let resolutions = ExecCommandResolution.resolveForAllowlist(
+                command: command,
+                rawCommand: nil,
+                cwd: nil,
+                env: ["PATH": "/usr/bin:/bin"])
+            #expect(resolutions.isEmpty)
+        }
     }
 
     @Test func `resolve for allowlist fails closed for env modified shell wrappers`() {
@@ -158,7 +337,7 @@ struct ExecAllowlistTests {
     }
 
     @Test func `resolve for allowlist keeps quoted operators in single segment`() {
-        let command = ["/bin/sh", "-lc", "echo \"a && b\""]
+        let command = ["/bin/sh", "-c", "echo \"a && b\""]
         let resolutions = ExecCommandResolution.resolveForAllowlist(
             command: command,
             rawCommand: "echo \"a && b\"",
@@ -226,7 +405,7 @@ struct ExecAllowlistTests {
         let fixtures = try Self.loadShellParserParityCases()
         for fixture in fixtures {
             let resolutions = ExecCommandResolution.resolveForAllowlist(
-                command: ["/bin/sh", "-lc", fixture.command],
+                command: ["/bin/sh", "-c", fixture.command],
                 rawCommand: fixture.command,
                 cwd: nil,
                 env: ["PATH": "/usr/bin:/bin"])
@@ -276,7 +455,7 @@ struct ExecAllowlistTests {
         let command = [
             "/usr/bin/env",
             "/bin/sh",
-            "-lc",
+            "-c",
             "echo allowlisted && /usr/bin/touch /tmp/openclaw-allowlist-test",
         ]
         let resolutions = ExecCommandResolution.resolveForAllowlist(
@@ -290,7 +469,7 @@ struct ExecAllowlistTests {
     }
 
     @Test func `resolve for allowlist unwraps env dispatch wrappers inside shell segments`() {
-        let command = ["/bin/sh", "-lc", "env /usr/bin/touch /tmp/openclaw-allowlist-test"]
+        let command = ["/bin/sh", "-c", "env /usr/bin/touch /tmp/openclaw-allowlist-test"]
         let resolutions = ExecCommandResolution.resolveForAllowlist(
             command: command,
             rawCommand: "env /usr/bin/touch /tmp/openclaw-allowlist-test",
@@ -302,7 +481,7 @@ struct ExecAllowlistTests {
     }
 
     @Test func `resolve for allowlist preserves env assignments inside shell segments`() {
-        let command = ["/bin/sh", "-lc", "env FOO=bar /usr/bin/touch /tmp/openclaw-allowlist-test"]
+        let command = ["/bin/sh", "-c", "env FOO=bar /usr/bin/touch /tmp/openclaw-allowlist-test"]
         let resolutions = ExecCommandResolution.resolveForAllowlist(
             command: command,
             rawCommand: "env FOO=bar /usr/bin/touch /tmp/openclaw-allowlist-test",
@@ -326,8 +505,8 @@ struct ExecAllowlistTests {
     }
 
     @Test func `approval evaluator resolves shell payload from canonical wrapper text`() async {
-        let command = ["/bin/sh", "-lc", "/usr/bin/printf ok"]
-        let rawCommand = "/bin/sh -lc \"/usr/bin/printf ok\""
+        let command = ["/bin/sh", "-c", "/usr/bin/printf ok"]
+        let rawCommand = "/bin/sh -c \"/usr/bin/printf ok\""
         let evaluation = await ExecApprovalEvaluator.evaluate(
             command: command,
             rawCommand: rawCommand,
@@ -348,6 +527,25 @@ struct ExecAllowlistTests {
             env: ["PATH": "/usr/bin:/bin"])
 
         #expect(patterns == ["/usr/bin/printf"])
+    }
+
+    @Test func `allow always patterns reject unsafe shell payloads`() {
+        for command in [
+            ["/bin/sh", "-c", #"bash -lc "echo ok""#],
+            ["/bin/sh", "-c", #"export BASH_ENV=/tmp/payload && bash -c "echo ok""#],
+            ["/bin/sh", "-c", #"unset BASH_ENV && bash -c "echo ok""#],
+            ["sudo", "bash", "-lc", "echo ok"],
+            ["exec", "-c", "bash", "-c", "echo ok"],
+            ["pwsh", "--", "./script.ps1"],
+            ["pwsh", "-Fi", "./script.ps1"],
+        ] {
+            let patterns = ExecCommandResolution.resolveAllowAlwaysPatterns(
+                command: command,
+                cwd: nil,
+                env: ["PATH": "/usr/bin:/bin"])
+
+            #expect(patterns.isEmpty)
+        }
     }
 
     @Test func `match all requires every segment to match`() {

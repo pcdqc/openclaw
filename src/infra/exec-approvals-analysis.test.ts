@@ -23,7 +23,7 @@ function expectAnalyzedShellCommand(
   return res;
 }
 
-function createSkillPreludeFixture(options: { withWrapper?: boolean } = {}) {
+function createSkillWrapperFixture(options: { withWrapper?: boolean } = {}) {
   const skillRoot = makeTempDir();
   const skillDir = path.join(skillRoot, "skills", "gog");
   const skillPath = path.join(skillDir, "SKILL.md");
@@ -608,16 +608,16 @@ describe("exec approvals shell analysis", () => {
       expect(result.allowlistSatisfied).toBe(testCase.expectedAllowlistSatisfied);
     });
 
-    it("allows the skill display prelude when a later skill wrapper is allowlisted", () => {
+    it("allows a direct trusted skill wrapper command", () => {
       if (process.platform === "win32") {
         return;
       }
-      const { skillRoot, skillPath, wrapperPath } = createSkillPreludeFixture({
+      const { skillRoot, wrapperPath } = createSkillWrapperFixture({
         withWrapper: true,
       });
 
       const result = evaluateShellAllowlist({
-        command: `cat ${skillPath} && printf '\\n---CMD---\\n' && ${wrapperPath} calendar events primary --today --json`,
+        command: `${wrapperPath} calendar events primary --today --json`,
         allowlist: [{ pattern: wrapperPath }],
         safeBins: new Set(),
         cwd: skillRoot,
@@ -625,55 +625,19 @@ describe("exec approvals shell analysis", () => {
 
       expect(result.analysisOk).toBe(true);
       expect(result.allowlistSatisfied).toBe(true);
-      expect(result.segmentSatisfiedBy).toEqual(["skillPrelude", "skillPrelude", "allowlist"]);
+      expect(result.segmentSatisfiedBy).toEqual(["allowlist"]);
     });
 
-    it("does not treat arbitrary allowlisted binaries as trusted skill wrappers", () => {
+    it("rejects the old skill display prelude even when a later skill wrapper is allowlisted", () => {
       if (process.platform === "win32") {
         return;
       }
-      const { skillRoot, skillPath } = createSkillPreludeFixture();
-
-      const result = evaluateShellAllowlist({
-        command: `cat ${skillPath} && printf '\\n---CMD---\\n' && /bin/echo calendar events primary --today --json`,
-        allowlist: [{ pattern: "/bin/echo" }],
-        safeBins: new Set(),
-        cwd: skillRoot,
-      });
-
-      expect(result.analysisOk).toBe(true);
-      expect(result.allowlistSatisfied).toBe(false);
-      expect(result.segmentSatisfiedBy).toEqual([null]);
-    });
-
-    it("still rejects the skill display prelude when no trusted skill command follows", () => {
-      if (process.platform === "win32") {
-        return;
-      }
-      const { skillRoot, skillPath } = createSkillPreludeFixture();
-
-      const result = evaluateShellAllowlist({
-        command: `cat ${skillPath} && printf '\\n---CMD---\\n'`,
-        allowlist: [],
-        safeBins: new Set(),
-        cwd: skillRoot,
-      });
-
-      expect(result.analysisOk).toBe(true);
-      expect(result.allowlistSatisfied).toBe(false);
-      expect(result.segmentSatisfiedBy).toEqual([null]);
-    });
-
-    it("rejects the skill display prelude when a trusted wrapper is not reachable", () => {
-      if (process.platform === "win32") {
-        return;
-      }
-      const { skillRoot, skillPath, wrapperPath } = createSkillPreludeFixture({
+      const { skillRoot, skillPath, wrapperPath } = createSkillWrapperFixture({
         withWrapper: true,
       });
 
       const result = evaluateShellAllowlist({
-        command: `cat ${skillPath} && printf '\\n---CMD---\\n' && false && ${wrapperPath} calendar events primary --today --json`,
+        command: `cat ${skillPath} && printf '\\n---CMD---\\n' && ${wrapperPath} calendar events primary --today --json`,
         allowlist: [{ pattern: wrapperPath }],
         safeBins: new Set(),
         cwd: skillRoot,
@@ -734,7 +698,16 @@ describe("exec approvals shell analysis", () => {
     });
 
     describe("shell wrapper inline compound allowlist", () => {
-      const commonShells = ["sh", "bash", "zsh", "dash", "ksh", "fish", "ash"] as const;
+      const commonShells = [
+        { shellBinary: "sh", inlineOptions: "-c" },
+        { shellBinary: "bash", inlineOptions: "-c" },
+        { shellBinary: "zsh", inlineOptions: "-f -c" },
+        { shellBinary: "zsh", inlineOptions: "-cf" },
+        { shellBinary: "dash", inlineOptions: "-c" },
+        { shellBinary: "ksh", inlineOptions: "-c" },
+        { shellBinary: "fish", inlineOptions: "-N -c" },
+        { shellBinary: "ash", inlineOptions: "-c" },
+      ] as const;
       type ShellFixture = {
         dir: string;
         env: NodeJS.ProcessEnv;
@@ -762,31 +735,37 @@ describe("exec approvals shell analysis", () => {
         }
       }
 
-      it.each(commonShells)("evaluates inner chain commands for %s -c wrappers", (shellBinary) => {
-        if (process.platform === "win32") {
-          return;
-        }
-        withShellFixture([shellBinary, "cat", "printf", "gog-wrapper"], ({ binPath, dir, env }) => {
-          const shellPath = binPath(shellBinary);
-          const catPath = binPath("cat");
-          const printfPath = binPath("printf");
-          const gogPath = binPath("gog-wrapper");
-          const result = evaluateShellAllowlist({
-            command: `${shellPath} -c "cat SKILL.md && printf '---CMD---' && gog-wrapper calendar events"`,
-            allowlist: [{ pattern: catPath }, { pattern: printfPath }, { pattern: gogPath }],
-            safeBins: new Set(),
-            cwd: dir,
-            env,
-          });
-          expect(result.analysisOk).toBe(true);
-          expect(result.allowlistSatisfied).toBe(true);
-          expect(result.allowlistMatches.length).toBe(3);
-          expect(result.segmentSatisfiedBy).toEqual(["allowlist"]);
-          expect(result.segmentAllowlistEntries).toEqual([null]);
-          expect(result.segmentSatisfiedBy.length).toBe(result.segments.length);
-          expect(result.segmentAllowlistEntries.length).toBe(result.segments.length);
-        });
-      });
+      it.each(commonShells)(
+        "evaluates inner chain commands for $shellBinary $inlineOptions safe inline wrappers",
+        ({ shellBinary, inlineOptions }) => {
+          if (process.platform === "win32") {
+            return;
+          }
+          withShellFixture(
+            [shellBinary, "cat", "printf", "gog-wrapper"],
+            ({ binPath, dir, env }) => {
+              const shellPath = binPath(shellBinary);
+              const catPath = binPath("cat");
+              const printfPath = binPath("printf");
+              const gogPath = binPath("gog-wrapper");
+              const result = evaluateShellAllowlist({
+                command: `${shellPath} ${inlineOptions} "cat README.md && printf ready && gog-wrapper calendar events"`,
+                allowlist: [{ pattern: catPath }, { pattern: printfPath }, { pattern: gogPath }],
+                safeBins: new Set(),
+                cwd: dir,
+                env,
+              });
+              expect(result.analysisOk).toBe(true);
+              expect(result.allowlistSatisfied).toBe(true);
+              expect(result.allowlistMatches.length).toBe(3);
+              expect(result.segmentSatisfiedBy).toEqual(["allowlist"]);
+              expect(result.segmentAllowlistEntries).toEqual([null]);
+              expect(result.segmentSatisfiedBy.length).toBe(result.segments.length);
+              expect(result.segmentAllowlistEntries.length).toBe(result.segments.length);
+            },
+          );
+        },
+      );
 
       it("rejects wrapper chain when any inner command misses the allowlist", () => {
         if (process.platform === "win32") {
@@ -797,7 +776,7 @@ describe("exec approvals shell analysis", () => {
           const catPath = binPath("cat");
           const gogPath = binPath("gog-wrapper");
           const result = evaluateShellAllowlist({
-            command: `${shellPath} -c "cat SKILL.md && rm -rf / && gog-wrapper calendar events"`,
+            command: `${shellPath} -c "cat README.md && rm -rf / && gog-wrapper calendar events"`,
             allowlist: [{ pattern: catPath }, { pattern: gogPath }],
             safeBins: new Set(),
             cwd: dir,

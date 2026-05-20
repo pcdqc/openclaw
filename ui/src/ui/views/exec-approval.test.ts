@@ -85,6 +85,23 @@ function createExecRequest(): ExecApprovalRequest {
   };
 }
 
+function createPluginRequest(): ExecApprovalRequest {
+  return {
+    id: "approval-plugin-1",
+    kind: "plugin",
+    request: {
+      command: "Approve plugin tool",
+      allowedDecisions: ["allow-once"],
+    },
+    pluginTitle: "Approve plugin tool",
+    pluginDescription: "Plugin wants to run a sensitive action.",
+    pluginSeverity: "medium",
+    pluginId: "test-plugin",
+    createdAtMs: Date.now() - 1_000,
+    expiresAtMs: Date.now() + 60_000,
+  };
+}
+
 function createExecState(
   overrides: Partial<
     Pick<
@@ -159,6 +176,46 @@ describe("approval and confirmation modals", () => {
     expect(spans).toEqual(["ls", "python -c"]);
   });
 
+  it("hides allow-always when the approval request excludes it", async () => {
+    const request = createExecRequest();
+    request.request.allowedDecisions = ["allow-once", "deny"];
+
+    render(renderExecApprovalPrompt(createExecState({ execApprovalQueue: [request] })), container);
+
+    await getRenderedDialog();
+
+    expect(container.textContent).toContain("Allow once");
+    expect(container.textContent).not.toContain("Allow Always");
+    expect(container.textContent).toContain("Deny");
+  });
+
+  it("renders only request-scoped approval decisions", async () => {
+    const request = createExecRequest();
+    request.request.allowedDecisions = ["deny"];
+    const handleExecApprovalDecision = vi.fn(async () => undefined);
+
+    render(
+      renderExecApprovalPrompt(
+        createExecState({
+          execApprovalQueue: [request],
+          handleExecApprovalDecision,
+        }),
+      ),
+      container,
+    );
+
+    await getRenderedDialog();
+
+    const buttonLabels = [...container.querySelectorAll("button")].map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(buttonLabels).toEqual(["Deny"]);
+
+    container.querySelector("button")?.click();
+
+    expect(handleExecApprovalDecision).toHaveBeenCalledWith("deny");
+  });
+
   it("maps Escape to exec denial when approval is idle", async () => {
     const handleExecApprovalDecision = vi.fn(async () => undefined);
     render(renderExecApprovalPrompt(createExecState({ handleExecApprovalDecision })), container);
@@ -167,6 +224,49 @@ describe("approval and confirmation modals", () => {
     dispatchEscape(dialog);
 
     expect(handleExecApprovalDecision).toHaveBeenCalledTimes(1);
+    expect(handleExecApprovalDecision).toHaveBeenCalledWith("deny");
+  });
+
+  it("keeps denial available for exec requests that omit deny", async () => {
+    const request = createExecRequest();
+    request.request.allowedDecisions = ["allow-once"];
+    const handleExecApprovalDecision = vi.fn(async () => undefined);
+    render(
+      renderExecApprovalPrompt(
+        createExecState({ execApprovalQueue: [request], handleExecApprovalDecision }),
+      ),
+      container,
+    );
+
+    const { dialog } = await getRenderedDialog();
+    const buttonLabels = [...container.querySelectorAll("button")].map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(buttonLabels).toEqual(["Allow once", "Deny"]);
+
+    dispatchEscape(dialog);
+
+    expect(handleExecApprovalDecision).toHaveBeenCalledWith("deny");
+  });
+
+  it("keeps denial available for plugin requests that omit deny", async () => {
+    const request = createPluginRequest();
+    const handleExecApprovalDecision = vi.fn(async () => undefined);
+    render(
+      renderExecApprovalPrompt(
+        createExecState({ execApprovalQueue: [request], handleExecApprovalDecision }),
+      ),
+      container,
+    );
+
+    const { dialog } = await getRenderedDialog();
+    const buttonLabels = [...container.querySelectorAll("button")].map((button) =>
+      button.textContent?.trim(),
+    );
+    expect(buttonLabels).toEqual(["Allow once", "Deny"]);
+
+    dispatchEscape(dialog);
+
     expect(handleExecApprovalDecision).toHaveBeenCalledWith("deny");
   });
 

@@ -330,6 +330,18 @@ describe("exec-command-resolution", () => {
     },
     {
       name: "busybox shell multiplexer",
+      argvFactory: ({ busybox }: { busybox: string }) => [busybox, "sh", "-c", "echo hi"],
+      envFactory: ({ binDir }: { binDir: string }) => ({
+        PATH: `${binDir}${path.delimiter}/bin:/usr/bin`,
+      }),
+      expectedExecutionPathFactory: () => "/bin/sh",
+      expectedPolicyPathFactory: ({ busybox }: { busybox: string }) => busybox,
+      expectedPlannedArgvFactory: () => [fs.realpathSync("/bin/sh"), "-c", "echo hi"],
+      allowlistPatternFactory: ({ busybox }: { busybox: string }) => busybox,
+      allowlistSatisfied: true,
+    },
+    {
+      name: "busybox login shell multiplexer",
       argvFactory: ({ busybox }: { busybox: string }) => [busybox, "sh", "-lc", "echo hi"],
       envFactory: ({ binDir }: { binDir: string }) => ({
         PATH: `${binDir}${path.delimiter}/bin:/usr/bin`,
@@ -338,7 +350,7 @@ describe("exec-command-resolution", () => {
       expectedPolicyPathFactory: ({ busybox }: { busybox: string }) => busybox,
       expectedPlannedArgvFactory: () => [fs.realpathSync("/bin/sh"), "-lc", "echo hi"],
       allowlistPatternFactory: ({ busybox }: { busybox: string }) => busybox,
-      allowlistSatisfied: true,
+      allowlistSatisfied: false,
     },
     {
       name: "semantic env wrapper",

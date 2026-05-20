@@ -1,5 +1,7 @@
 import { normalizeOptionalString } from "../string-coerce.ts";
 
+export type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
+
 export type ExecApprovalRequestPayload = {
   command: string;
   cwd?: string | null;
@@ -13,6 +15,7 @@ export type ExecApprovalRequestPayload = {
     startIndex: number;
     endIndex: number;
   }[];
+  allowedDecisions?: readonly ExecApprovalDecision[];
 };
 
 export type ExecApprovalRequest = {
@@ -70,6 +73,17 @@ function parseCommandSpans(value: unknown):
   return spans.length > 0 ? spans : undefined;
 }
 
+function parseAllowedDecisions(value: unknown): ExecApprovalDecision[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const decisions = value.filter(
+    (decision): decision is ExecApprovalDecision =>
+      decision === "allow-once" || decision === "allow-always" || decision === "deny",
+  );
+  return decisions.length > 0 ? [...new Set(decisions)] : undefined;
+}
+
 export function parseExecApprovalRequested(payload: unknown): ExecApprovalRequest | null {
   if (!isRecord(payload)) {
     return null;
@@ -101,6 +115,7 @@ export function parseExecApprovalRequested(payload: unknown): ExecApprovalReques
       resolvedPath: typeof request.resolvedPath === "string" ? request.resolvedPath : null,
       sessionKey: typeof request.sessionKey === "string" ? request.sessionKey : null,
       commandSpans: parseCommandSpans(request.commandSpans),
+      allowedDecisions: parseAllowedDecisions(request.allowedDecisions),
     },
     createdAtMs,
     expiresAtMs,
@@ -153,6 +168,7 @@ export function parsePluginApprovalRequested(payload: unknown): ExecApprovalRequ
       command: title,
       agentId: typeof request.agentId === "string" ? request.agentId : null,
       sessionKey: typeof request.sessionKey === "string" ? request.sessionKey : null,
+      allowedDecisions: parseAllowedDecisions(request.allowedDecisions),
     },
     pluginTitle: title,
     pluginDescription: description,

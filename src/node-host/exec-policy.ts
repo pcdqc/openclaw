@@ -61,7 +61,7 @@ export function evaluateSystemRunPolicy(params: {
   cmdInvocation: boolean;
   shellWrapperInvocation: boolean;
 }): SystemRunPolicyDecision {
-  // POSIX node execution intentionally uses `/bin/sh -lc` as a transport wrapper.
+  // POSIX node execution intentionally uses `/bin/sh -c` as a transport wrapper.
   // Keep allowlist decisions based on the analyzed inner shell payload there.
   // Windows `cmd.exe /c` wrappers still require explicit approval because they
   // change execution semantics for builtins and quoting/parsing behavior.

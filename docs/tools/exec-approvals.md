@@ -352,6 +352,10 @@ When **Auto-allow skill CLIs** is enabled, executables referenced by
 known skills are treated as allowlisted on nodes (macOS node or headless
 node host). This uses `skills.bins` over the Gateway RPC to fetch the
 skill bin list. Disable this if you want strict manual allowlists.
+This only applies to the actual skill executable. OpenClaw does not
+special-case shell preambles such as `cat SKILL.md && printf ...`; agents
+should read skill files with the `read` tool, then run only the real
+command through exec.
 
 <Warning>
 - This is an **implicit convenience allowlist**, separate from manual path allowlist entries.

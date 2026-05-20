@@ -568,6 +568,10 @@ actor MacNodeRuntime {
                 ask: evaluation.ask,
                 agentId: evaluation.agentId,
                 resolution: evaluation.resolution,
+                cwd: evaluation.cwd,
+                approvalEnv: evaluation.approvalEnv,
+                allowAlwaysPatterns: evaluation.allowAlwaysPatterns,
+                exactCommandDurableApprovalAllowed: evaluation.exactCommandDurableApprovalAllowed,
                 allowlistMatch: evaluation.allowlistMatch,
                 skillAllow: evaluation.skillAllow,
                 sessionKey: sessionKey,
@@ -579,7 +583,11 @@ actor MacNodeRuntime {
             persistAllowlist: persistAllowlist,
             security: evaluation.security,
             agentId: evaluation.agentId,
-            allowAlwaysPatterns: evaluation.allowAlwaysPatterns)
+            allowAlwaysPatterns: evaluation.allowAlwaysPatterns,
+            exactCommandDurableApprovalAllowed: evaluation.exactCommandDurableApprovalAllowed,
+            displayCommand: evaluation.displayCommand,
+            cwd: evaluation.cwd,
+            env: evaluation.approvalEnv)
 
         if evaluation.security == .allowlist, !evaluation.allowlistSatisfied, !evaluation.skillAllow, !approvedByAsk {
             await self.emitExecEvent(
@@ -663,10 +671,18 @@ actor MacNodeRuntime {
         var ask: ExecAsk
         var agentId: String?
         var resolution: ExecCommandResolution?
+        var cwd: String?
+        var approvalEnv: [String: String]?
+        var allowAlwaysPatterns: [String]
+        var exactCommandDurableApprovalAllowed: Bool
         var allowlistMatch: ExecAllowlistEntry?
         var skillAllow: Bool
         var sessionKey: String
         var runId: String
+
+        var allowAlwaysAvailable: Bool {
+            !self.allowAlwaysPatterns.isEmpty || self.exactCommandDurableApprovalAllowed
+        }
     }
 
     private func resolveSystemRunApproval(
@@ -681,6 +697,18 @@ actor MacNodeRuntime {
             skillAllow: context.skillAllow)
 
         let decisionFromParams = ExecApprovalHelpers.parseDecision(params.approvalDecision)
+        let allowedDecisions = ExecApprovalHelpers.allowedDecisions(
+            ask: context.ask,
+            allowAlwaysAvailable: context.allowAlwaysAvailable)
+        if let decisionFromParams, !allowedDecisions.contains(decisionFromParams) {
+            return ExecApprovalOutcome(
+                approvedByAsk: false,
+                persistAllowlist: false,
+                response: Self.errorResponse(
+                    req,
+                    code: .unavailable,
+                    message: "SYSTEM_RUN_DENIED: approval decision unavailable"))
+        }
         var approvedByAsk = params.approved == true || decisionFromParams != nil
         var persistAllowlist = decisionFromParams == .allowAlways
         if decisionFromParams == .deny {
@@ -712,7 +740,10 @@ actor MacNodeRuntime {
                         ask: context.ask.rawValue,
                         agentId: context.agentId,
                         resolvedPath: context.resolution?.resolvedPath,
-                        sessionKey: context.sessionKey))
+                        sessionKey: context.sessionKey,
+                        allowedDecisions: ExecApprovalsPromptPresenter.allowedDecisions(
+                            ask: context.ask,
+                            allowAlwaysAvailable: context.allowAlwaysAvailable)))
             }
             switch decision {
             case .deny:
@@ -866,12 +897,23 @@ extension MacNodeRuntime {
         persistAllowlist: Bool,
         security: ExecSecurity,
         agentId: String?,
-        allowAlwaysPatterns: [String])
+        allowAlwaysPatterns: [String],
+        exactCommandDurableApprovalAllowed: Bool,
+        displayCommand: String,
+        cwd: String?,
+        env: [String: String]?)
     {
         guard persistAllowlist, security == .allowlist else { return }
         var seenPatterns = Set<String>()
         for pattern in allowAlwaysPatterns where seenPatterns.insert(pattern).inserted {
             ExecApprovalsStore.addAllowlistEntry(agentId: agentId, pattern: pattern)
+        }
+        if seenPatterns.isEmpty, exactCommandDurableApprovalAllowed {
+            ExecApprovalsStore.addDurableCommandApproval(
+                agentId: agentId,
+                commandText: displayCommand,
+                cwd: cwd,
+                env: env)
         }
     }
 

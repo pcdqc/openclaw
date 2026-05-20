@@ -141,4 +141,25 @@ enum HostEnvSanitizer {
         }
         return merged
     }
+
+    static func sanitizeOverridesForBinding(
+        overrides: [String: String]?,
+        shellWrapper: Bool = false) -> [String: String]?
+    {
+        let effectiveOverrides = shellWrapper
+            ? self.filterOverridesForShellWrapper(overrides)
+            : overrides
+        guard let effectiveOverrides else { return nil }
+
+        var sanitized: [String: String] = [:]
+        for (rawKey, value) in effectiveOverrides {
+            guard let key = self.normalizeOverrideKey(rawKey) else { continue }
+            let upper = key.uppercased()
+            if upper == "PATH" { continue }
+            if self.isBlockedOverride(upper) { continue }
+            if self.isBlocked(upper) { continue }
+            sanitized[key] = value
+        }
+        return sanitized.isEmpty ? nil : sanitized
+    }
 }

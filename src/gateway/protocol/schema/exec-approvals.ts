@@ -144,6 +144,12 @@ export const ExecApprovalRequestParamsSchema = Type.Object(
         ),
       ),
     ),
+    allowedDecisions: Type.Optional(
+      Type.Array(Type.String({ enum: ["allow-once", "allow-always", "deny"] }), {
+        minItems: 1,
+        maxItems: 3,
+      }),
+    ),
     agentId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     resolvedPath: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     sessionKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),

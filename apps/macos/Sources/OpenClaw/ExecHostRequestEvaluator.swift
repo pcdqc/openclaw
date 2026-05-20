@@ -45,6 +45,18 @@ enum ExecHostRequestEvaluator {
         context: ExecApprovalEvaluation,
         approvalDecision: ExecApprovalDecision?) -> ExecHostPolicyDecision
     {
+        if let approvalDecision,
+           !ExecApprovalHelpers.allowedDecisions(
+               ask: context.ask,
+               allowAlwaysAvailable: context.allowAlwaysAvailable).contains(approvalDecision)
+        {
+            return .deny(
+                ExecHostError(
+                    code: "UNAVAILABLE",
+                    message: "SYSTEM_RUN_DENIED: approval decision unavailable",
+                    reason: "approval-decision-unavailable"))
+        }
+
         if context.security == .deny {
             return .deny(
                 ExecHostError(

@@ -13,6 +13,19 @@ describe("parseExecApprovalRequested", () => {
     expect(result!.kind).toBe("exec");
     expect(result!.request.command).toBe("rm -rf /");
   });
+
+  it("parses explicit allowed decisions", () => {
+    const result = parseExecApprovalRequested({
+      id: "exec-1",
+      request: {
+        command: "echo hi",
+        allowedDecisions: ["allow-once", "allow-always", "deny", "bogus", "allow-once"],
+      },
+      createdAtMs: 1000,
+      expiresAtMs: 2000,
+    });
+    expect(result?.request.allowedDecisions).toEqual(["allow-once", "allow-always", "deny"]);
+  });
 });
 
 describe("parsePluginApprovalRequested", () => {
@@ -29,6 +42,7 @@ describe("parsePluginApprovalRequested", () => {
       pluginId: "sage",
       agentId: "agent-1",
       sessionKey: "sess-1",
+      allowedDecisions: ["allow-once", "deny"],
     },
   };
 
@@ -43,6 +57,7 @@ describe("parsePluginApprovalRequested", () => {
     expect(result!.request.command).toBe("Dangerous command detected");
     expect(result!.request.agentId).toBe("agent-1");
     expect(result!.request.sessionKey).toBe("sess-1");
+    expect(result!.request.allowedDecisions).toEqual(["allow-once", "deny"]);
     expect(result!.createdAtMs).toBe(1000);
     expect(result!.expiresAtMs).toBe(120_000);
   });

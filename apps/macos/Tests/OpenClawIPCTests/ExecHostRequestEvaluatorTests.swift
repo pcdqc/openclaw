@@ -62,22 +62,65 @@ struct ExecHostRequestEvaluatorTests {
         }
     }
 
+    @Test func `evaluate denies unavailable allow always decision`() {
+        let context = Self.makeContext(
+            security: .allowlist,
+            ask: .always,
+            allowlistSatisfied: false,
+            skillAllow: false,
+            allowAlwaysPatterns: ["/usr/bin/echo"])
+        let decision = ExecHostRequestEvaluator.evaluate(context: context, approvalDecision: .allowAlways)
+        switch decision {
+        case let .deny(error):
+            #expect(error.reason == "approval-decision-unavailable")
+        case .requiresPrompt:
+            Issue.record("expected unavailable decision deny")
+        case .allow:
+            Issue.record("expected unavailable decision deny")
+        }
+    }
+
+    @Test func `evaluate accepts exact command allow always decision`() {
+        let context = Self.makeContext(
+            security: .allowlist,
+            ask: .onMiss,
+            allowlistSatisfied: false,
+            skillAllow: false,
+            exactCommandDurableApprovalAllowed: true)
+        #expect(context.allowAlwaysAvailable)
+
+        let decision = ExecHostRequestEvaluator.evaluate(context: context, approvalDecision: .allowAlways)
+        switch decision {
+        case let .allow(approvedByAsk):
+            #expect(approvedByAsk)
+        case .requiresPrompt:
+            Issue.record("expected allow decision")
+        case let .deny(error):
+            Issue.record("unexpected deny: \(error.message)")
+        }
+    }
+
     private static func makeContext(
         security: ExecSecurity,
         ask: ExecAsk,
         allowlistSatisfied: Bool,
-        skillAllow: Bool) -> ExecApprovalEvaluation
+        skillAllow: Bool,
+        allowAlwaysPatterns: [String] = [],
+        exactCommandDurableApprovalAllowed: Bool = false) -> ExecApprovalEvaluation
     {
         ExecApprovalEvaluation(
             command: ["/usr/bin/echo", "hi"],
             displayCommand: "/usr/bin/echo hi",
             agentId: nil,
+            cwd: nil,
+            approvalEnv: nil,
             security: security,
             ask: ask,
             env: [:],
             resolution: nil,
             allowlistResolutions: [],
-            allowAlwaysPatterns: [],
+            allowAlwaysPatterns: allowAlwaysPatterns,
+            exactCommandDurableApprovalAllowed: exactCommandDurableApprovalAllowed,
             allowlistMatches: [],
             allowlistSatisfied: allowlistSatisfied,
             allowlistMatch: nil,

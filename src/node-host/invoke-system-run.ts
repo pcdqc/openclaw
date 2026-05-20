@@ -106,6 +106,7 @@ type SystemRunPolicyPhase = SystemRunParsePhase & {
   security: ExecSecurity;
   policy: ReturnType<typeof evaluateSystemRunPolicy>;
   durableApprovalSatisfied: boolean;
+  exactCommandDurableApprovalAllowed: boolean;
   strictInlineEval: boolean;
   inlineEvalHit: InterpreterInlineEvalHit | null;
   allowlistMatches: ExecAllowlistEntry[];
@@ -389,20 +390,26 @@ async function evaluateSystemRunPolicyPhase(
     onWarning: warnWritableTrustedDirOnce,
   });
   const bins = autoAllowSkills ? await opts.skillBins.current() : [];
-  let { analysisOk, allowlistMatches, allowlistSatisfied, segments, segmentAllowlistEntries } =
-    evaluateSystemRunAllowlist({
-      shellCommand: parsed.shellPayload,
-      argv: parsed.argv,
-      approvals,
-      security,
-      safeBins,
-      safeBinProfiles,
-      trustedSafeBinDirs,
-      cwd: parsed.cwd,
-      env: parsed.env,
-      skillBins: bins,
-      autoAllowSkills,
-    });
+  let {
+    analysisOk,
+    allowlistMatches,
+    allowlistSatisfied,
+    exactCommandDurableApprovalAllowed,
+    segments,
+    segmentAllowlistEntries,
+  } = evaluateSystemRunAllowlist({
+    shellCommand: parsed.shellPayload,
+    argv: parsed.argv,
+    approvals,
+    security,
+    safeBins,
+    safeBinProfiles,
+    trustedSafeBinDirs,
+    cwd: parsed.cwd,
+    env: parsed.env,
+    skillBins: bins,
+    autoAllowSkills,
+  });
   const strictInlineEval =
     agentExec?.strictInlineEval === true || cfg.tools?.exec?.strictInlineEval === true;
   const inlineEvalHit = strictInlineEval ? detectPolicyInlineEval(segments) : null;
@@ -415,8 +422,10 @@ async function evaluateSystemRunPolicyPhase(
   const durableApprovalSatisfied = hasDurableExecApproval({
     analysisOk,
     segmentAllowlistEntries,
-    allowlist: approvals.allowlist,
-    commandText: parsed.commandText,
+    allowlist: exactCommandDurableApprovalAllowed ? approvals.allowlist : undefined,
+    commandText: exactCommandDurableApprovalAllowed ? parsed.commandText : null,
+    cwd: parsed.cwd,
+    env: parsed.envOverrides,
   });
   const inlineEvalExecutableTrusted =
     inlineEvalHit !== null &&
@@ -511,6 +520,7 @@ async function evaluateSystemRunPolicyPhase(
     security,
     policy,
     durableApprovalSatisfied,
+    exactCommandDurableApprovalAllowed,
     strictInlineEval,
     inlineEvalHit,
     allowlistMatches,
@@ -629,8 +639,11 @@ async function executeSystemRunPhase(
           strictInlineEval: phase.strictInlineEval,
         })
       : [];
-    if (patterns.length === 0) {
-      addDurableCommandApproval(phase.approvals.file, phase.agentId, phase.commandText);
+    if (patterns.length === 0 && phase.exactCommandDurableApprovalAllowed) {
+      addDurableCommandApproval(phase.approvals.file, phase.agentId, phase.commandText, {
+        cwd: phase.cwd,
+        env: phase.envOverrides,
+      });
     }
   }
 

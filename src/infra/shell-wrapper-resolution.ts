@@ -1,12 +1,23 @@
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import {
+  hasSudoEnvAssignmentsBeforeCarriedCommand,
+  hasSudoShellStartupContextBeforeCarriedCommand,
+  isEnvAssignmentToken,
+  resolveCarrierCommandArgv,
+} from "./command-carriers.js";
+import {
   MAX_DISPATCH_WRAPPER_DEPTH,
   hasDispatchEnvManipulation,
   unwrapKnownDispatchWrapperInvocation,
 } from "./dispatch-wrapper-resolution.js";
 import { normalizeExecutableToken } from "./exec-wrapper-tokens.js";
+import { resolvePosixInlineCommandMatch } from "./posix-shell-options.js";
 import {
-  POSIX_INLINE_COMMAND_FLAGS,
+  POWERSHELL_COMMAND_TEXT_OPTIONS,
+  isPowerShellOptionToken,
+  powerShellOptionConsumesNextArg,
+} from "./powershell-options.js";
+import {
   POWERSHELL_INLINE_COMMAND_FLAGS,
   resolveInlineCommandMatch,
 } from "./shell-inline-command.js";
@@ -192,7 +203,7 @@ export function unwrapKnownShellMultiplexerInvocation(
 }
 
 function extractPosixShellInlineCommand(argv: string[]): string | null {
-  return extractInlineCommandByFlags(argv, POSIX_INLINE_COMMAND_FLAGS, { allowCombinedC: true });
+  return resolvePosixInlineCommandMatch(argv).command;
 }
 
 function extractCmdInlineCommand(argv: string[]): string | null {
@@ -212,13 +223,44 @@ function extractCmdInlineCommand(argv: string[]): string | null {
 }
 
 function extractPowerShellInlineCommand(argv: string[]): string | null {
-  return extractInlineCommandByFlags(argv, POWERSHELL_INLINE_COMMAND_FLAGS);
+  const match = resolveInlineCommandMatch(argv, POWERSHELL_INLINE_COMMAND_FLAGS, {
+    isOptionToken: isPowerShellOptionToken,
+    optionConsumesNextArg: powerShellOptionConsumesNextArg,
+    stopAtFirstOperand: true,
+  });
+  if (match.command === null || match.valueTokenIndex === null) {
+    return null;
+  }
+
+  const valueToken = argv[match.valueTokenIndex]?.trim() ?? "";
+  const equalsIndex = valueToken.indexOf("=");
+  if (
+    equalsIndex > 0 &&
+    POWERSHELL_COMMAND_TEXT_OPTIONS.has(
+      normalizeLowercaseStringOrEmpty(valueToken.slice(0, equalsIndex)),
+    )
+  ) {
+    return [match.command, ...argv.slice(match.valueTokenIndex + 1)]
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .join(" ");
+  }
+
+  const flagToken = argv[match.valueTokenIndex - 1]?.trim() ?? "";
+  if (POWERSHELL_COMMAND_TEXT_OPTIONS.has(normalizeLowercaseStringOrEmpty(flagToken))) {
+    return argv
+      .slice(match.valueTokenIndex)
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .join(" ");
+  }
+  return match.command;
 }
 
 function extractInlineCommandByFlags(
   argv: string[],
   flags: ReadonlySet<string>,
-  options: { allowCombinedC?: boolean } = {},
+  options: Parameters<typeof resolveInlineCommandMatch>[2] = {},
 ): string | null {
   return resolveInlineCommandMatch(argv, flags, options).command;
 }
@@ -265,6 +307,42 @@ export function hasEnvManipulationBeforeShellWrapper(argv: string[]): boolean {
   return hasEnvManipulationBeforeShellWrapperInternal(argv, 0, false);
 }
 
+export function hasEnvManipulationBeforeShellWrapperInvocation(argv: string[]): boolean {
+  const resolved = resolveShellWrapperInvocationThroughCarriersInternal(
+    argv,
+    0,
+    false,
+    false,
+    false,
+    undefined,
+    new Set(),
+  );
+  return Boolean(resolved?.envManipulationSeen || resolved?.argv0ManipulationSeen);
+}
+
+export function hasShellAssignmentPrefixBeforeShellWrapperInvocation(
+  argv: readonly string[],
+): boolean {
+  let commandIndex = 0;
+  while (commandIndex < argv.length && isEnvAssignmentToken(argv[commandIndex] ?? "")) {
+    commandIndex += 1;
+  }
+  if (commandIndex === 0 || commandIndex >= argv.length) {
+    return false;
+  }
+  return (
+    resolveShellWrapperInvocationThroughCarriersInternal(
+      argv.slice(commandIndex),
+      0,
+      false,
+      false,
+      false,
+      undefined,
+      new Set(),
+    ) !== null
+  );
+}
+
 function extractShellWrapperCommandInternal(
   argv: string[],
   rawCommand: string | null,
@@ -282,9 +360,187 @@ export function resolveShellWrapperTransportArgv(argv: string[]): string[] | nul
   return resolveShellWrapperSpecAndArgvInternal(argv, 0)?.argv ?? null;
 }
 
+export function resolveShellWrapperArgv(argv: string[]): string[] | null {
+  const candidate = resolveShellWrapperCandidate({ argv, depth: 0, state: null });
+  return candidate && isShellWrapperExecutable(candidate.token0) ? candidate.argv : null;
+}
+
+type ShellWrapperInvocationThroughCarriers = {
+  argv: string[];
+  envManipulationSeen: boolean;
+  argv0ManipulationSeen: boolean;
+  policyBlocked: boolean;
+  blockedWrapper?: string;
+};
+
+function argvKey(argv: readonly string[]): string {
+  return argv.join("\0");
+}
+
+function resolveNonEnvCarrierCommandArgv(argv: string[], depth: number): string[] | null {
+  if (normalizeExecutableToken(argv[0] ?? "") === "env") {
+    return null;
+  }
+  return resolveCarrierCommandArgv(argv, depth, { includeExec: true });
+}
+
+function execInvocationChangesShellContext(argv: readonly string[]): boolean {
+  if (normalizeExecutableToken(argv[0] ?? "") !== "exec") {
+    return false;
+  }
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token === "--" || !token.startsWith("-")) {
+      return false;
+    }
+    if (!/^-[A-Za-z0-9]/u.test(token)) {
+      return false;
+    }
+    for (let tokenIndex = 1; tokenIndex < token.length; tokenIndex += 1) {
+      const flag = token[tokenIndex] ?? "";
+      if (flag === "l" || flag === "a") {
+        return true;
+      }
+      if (flag === "c") {
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+function resolveShellWrapperInvocationThroughCarriersInternal(
+  argv: readonly string[],
+  depth: number,
+  envManipulationSeen: boolean,
+  argv0ManipulationSeen: boolean,
+  policyBlocked: boolean,
+  blockedWrapper: string | undefined,
+  seenArgv: Set<string>,
+): ShellWrapperInvocationThroughCarriers | null {
+  const current = [...argv];
+  if (!isWithinDispatchClassificationDepth(depth)) {
+    return {
+      argv: current,
+      envManipulationSeen,
+      argv0ManipulationSeen,
+      policyBlocked: true,
+      blockedWrapper: blockedWrapper ?? "carrier-depth",
+    };
+  }
+  const key = argvKey(current);
+  if (seenArgv.has(key)) {
+    return null;
+  }
+  seenArgv.add(key);
+
+  const dispatchUnwrap = unwrapKnownDispatchWrapperInvocation(current);
+  const nextPolicyBlocked = policyBlocked || dispatchUnwrap.kind === "blocked";
+  const nextBlockedWrapper =
+    blockedWrapper ?? (dispatchUnwrap.kind === "blocked" ? dispatchUnwrap.wrapper : undefined);
+  if (dispatchUnwrap.kind === "unwrapped" && dispatchUnwrap.wrapper === "env") {
+    return resolveShellWrapperInvocationThroughCarriersInternal(
+      dispatchUnwrap.argv,
+      depth + 1,
+      envManipulationSeen || hasDispatchEnvManipulation(current),
+      argv0ManipulationSeen,
+      nextPolicyBlocked,
+      nextBlockedWrapper,
+      seenArgv,
+    );
+  }
+
+  const carrierArgv = resolveNonEnvCarrierCommandArgv(current, depth);
+  if (carrierArgv && carrierArgv.length > 0) {
+    return resolveShellWrapperInvocationThroughCarriersInternal(
+      carrierArgv,
+      depth + 1,
+      envManipulationSeen ||
+        hasSudoEnvAssignmentsBeforeCarriedCommand(current) ||
+        hasSudoShellStartupContextBeforeCarriedCommand(current),
+      argv0ManipulationSeen || execInvocationChangesShellContext(current),
+      nextPolicyBlocked,
+      nextBlockedWrapper,
+      seenArgv,
+    );
+  }
+
+  const candidate = resolveShellWrapperCandidate({
+    argv: current,
+    depth,
+    state: envManipulationSeen,
+    onDispatchUnwrap: (state, wrappedArgv) => state || hasDispatchEnvManipulation(wrappedArgv),
+  });
+  if (!candidate) {
+    return null;
+  }
+  if (isShellWrapperExecutable(candidate.token0)) {
+    return {
+      argv: candidate.argv,
+      envManipulationSeen: candidate.state,
+      argv0ManipulationSeen,
+      policyBlocked: nextPolicyBlocked,
+      ...(nextBlockedWrapper ? { blockedWrapper: nextBlockedWrapper } : {}),
+    };
+  }
+
+  const carriedArgv = resolveNonEnvCarrierCommandArgv(candidate.argv, depth);
+  if (!carriedArgv || carriedArgv.length === 0) {
+    return null;
+  }
+  return resolveShellWrapperInvocationThroughCarriersInternal(
+    carriedArgv,
+    depth + 1,
+    candidate.state ||
+      hasSudoEnvAssignmentsBeforeCarriedCommand(candidate.argv) ||
+      hasSudoShellStartupContextBeforeCarriedCommand(candidate.argv),
+    argv0ManipulationSeen || execInvocationChangesShellContext(candidate.argv),
+    nextPolicyBlocked,
+    nextBlockedWrapper,
+    seenArgv,
+  );
+}
+
+export function resolveShellWrapperArgvThroughCarriers(argv: readonly string[]): string[] | null {
+  const resolved = resolveShellWrapperInvocationThroughCarriersInternal(
+    argv,
+    0,
+    false,
+    false,
+    false,
+    undefined,
+    new Set(),
+  );
+  return resolved && !resolved.policyBlocked ? resolved.argv : null;
+}
+
+export function hasPolicyBlockedCarrierBeforeShellWrapperInvocation(
+  argv: readonly string[],
+): boolean {
+  return (
+    resolveShellWrapperInvocationThroughCarriersInternal(
+      argv,
+      0,
+      false,
+      false,
+      false,
+      undefined,
+      new Set(),
+    )?.policyBlocked === true
+  );
+}
+
 export function extractShellWrapperInlineCommand(argv: string[]): string | null {
   const extracted = extractShellWrapperCommandInternal(argv, null, 0);
   return extracted.isWrapper ? extracted.command : null;
+}
+
+export function extractShellWrapperInlineCommandThroughCarriers(
+  argv: readonly string[],
+): string | null {
+  const transportArgv = resolveShellWrapperArgvThroughCarriers(argv);
+  return transportArgv ? extractShellWrapperInlineCommand(transportArgv) : null;
 }
 
 export function extractShellWrapperCommand(

@@ -886,7 +886,8 @@ describe("exec approval handlers", () => {
       { label: "string", extra: { resolvedPath: "/usr/bin/echo" } },
       { label: "undefined", extra: { resolvedPath: undefined } },
       { label: "null", extra: { resolvedPath: null } },
-    ])("accepts request with resolvedPath $label", ({ extra }) => {
+      { label: "allowed decisions", extra: { allowedDecisions: ["allow-once", "deny"] } },
+    ])("accepts request validation extra $label", ({ extra }) => {
       const params = { ...baseParams, ...extra };
       expect(validateExecApprovalRequestParams(params)).toBe(true);
     });
@@ -975,6 +976,245 @@ describe("exec approval handlers", () => {
       context,
     });
     await requestPromise;
+  });
+
+  it("preserves explicit allowed decisions on exec approval requests", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        commandArgv: ["echo", "ok"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+        allowedDecisions: ["allow-once", "deny"],
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    const request = (requested?.payload as { request?: Record<string, unknown> })?.request ?? {};
+    expect(id).not.toBe("");
+    expect(request["allowedDecisions"]).toEqual(["allow-once", "deny"]);
+
+    const getRespond = vi.fn();
+    await getExecApproval({ handlers, id, respond: getRespond });
+    expect(getRespond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+      undefined,
+    );
+
+    const allowAlwaysRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "allow-always",
+      respond: allowAlwaysRespond,
+      context,
+    });
+    expect(allowAlwaysRespond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message:
+          "allow-always is unavailable because the effective policy requires approval every time",
+      }),
+    );
+
+    const denyRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "deny",
+      respond: denyRespond,
+      context,
+    });
+    await requestPromise;
+    expect(denyRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("does not let explicit decisions re-enable allow-always for ask always", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        commandArgv: ["echo", "ok"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+        ask: "always",
+        allowedDecisions: ["allow-always", "deny"],
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    const request = (requested?.payload as { request?: Record<string, unknown> })?.request ?? {};
+    expect(id).not.toBe("");
+    expect(request["allowedDecisions"]).toEqual(["deny"]);
+
+    const allowAlwaysRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "allow-always",
+      respond: allowAlwaysRespond,
+      context,
+    });
+    expect(allowAlwaysRespond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message:
+          "allow-always is unavailable because the effective policy requires approval every time",
+      }),
+    );
+
+    const denyRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "deny",
+      respond: denyRespond,
+      context,
+    });
+    await requestPromise;
+    expect(denyRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("keeps deny available when explicit exec decisions omit it", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        commandArgv: ["echo", "ok"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+        allowedDecisions: ["allow-once"],
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    const request = (requested?.payload as { request?: Record<string, unknown> })?.request ?? {};
+    expect(id).not.toBe("");
+    expect(request["allowedDecisions"]).toEqual(["allow-once", "deny"]);
+
+    const denyRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "deny",
+      respond: denyRespond,
+      context,
+    });
+    await requestPromise;
+    expect(denyRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("dedupes explicit exec decisions before adding deny", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        commandArgv: ["echo", "ok"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+        allowedDecisions: ["allow-once", "allow-once", "allow-once"],
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    const request = (requested?.payload as { request?: Record<string, unknown> })?.request ?? {};
+    expect(id).not.toBe("");
+    expect(request["allowedDecisions"]).toEqual(["allow-once", "deny"]);
+
+    const denyRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "deny",
+      respond: denyRespond,
+      context,
+    });
+    await requestPromise;
+    expect(denyRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("uses a generic unavailable message for non-allow-always decisions", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        commandArgv: ["echo", "ok"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+        allowedDecisions: ["deny"],
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    expect(id).not.toBe("");
+
+    const allowOnceRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "allow-once",
+      respond: allowOnceRespond,
+      context,
+    });
+    expect(allowOnceRespond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: "allow-once is unavailable for this approval request",
+      }),
+    );
+
+    const denyRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      decision: "deny",
+      respond: denyRespond,
+      context,
+    });
+    await requestPromise;
+    expect(denyRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
   });
 
   it("attaches shared command analysis to gateway exec approval requests", async () => {

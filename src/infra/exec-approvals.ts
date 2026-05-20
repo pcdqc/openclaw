@@ -14,6 +14,7 @@ import type { ExecCommandSegment } from "./exec-approvals-analysis.js";
 import type { ExecAllowlistEntry } from "./exec-approvals.types.js";
 import { assertNoSymlinkParentsSync } from "./fs-safe-advanced.js";
 import { expandHomePrefix, resolveRequiredHomeDir } from "./home-dir.js";
+import { normalizeHostOverrideEnvVarKey } from "./host-env-security.js";
 import { requestJsonlSocket } from "./jsonl-socket.js";
 export * from "./exec-approvals-analysis.js";
 export * from "./exec-approvals-allowlist.js";
@@ -1019,11 +1020,17 @@ export function hasDurableExecApproval(params: {
   segmentAllowlistEntries: Array<ExecAllowlistEntry | null>;
   allowlist?: readonly ExecAllowlistEntry[];
   commandText?: string | null;
+  cwd?: string | null;
+  env?: Record<string, string | undefined> | null;
+  envHash?: string | null;
 }): boolean {
   return (
     hasExactCommandDurableExecApproval({
       allowlist: params.allowlist,
       commandText: params.commandText,
+      cwd: params.cwd,
+      env: params.env,
+      envHash: params.envHash,
     }) ||
     hasSegmentDurableExecApproval({
       analysisOk: params.analysisOk,
@@ -1032,25 +1039,62 @@ export function hasDurableExecApproval(params: {
   );
 }
 
-function buildDurableCommandApprovalPattern(commandText: string): string {
-  const digest = crypto.createHash("sha256").update(commandText).digest("hex").slice(0, 16);
+type DurableCommandApprovalContext = {
+  commandText?: string | null;
+  cwd?: string | null;
+  env?: Record<string, string | undefined> | null;
+  envHash?: string | null;
+};
+
+function hashDurableCommandEnv(env?: Record<string, string | undefined> | null): string | null {
+  if (!env) {
+    return null;
+  }
+  const entries: Array<[string, string]> = [];
+  for (const [rawKey, rawValue] of Object.entries(env)) {
+    if (typeof rawValue !== "string") {
+      continue;
+    }
+    const key = normalizeHostOverrideEnvVarKey(rawKey);
+    if (!key) {
+      continue;
+    }
+    entries.push([key, rawValue]);
+  }
+  if (entries.length === 0) {
+    return null;
+  }
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return crypto.createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
+function buildDurableCommandApprovalPattern(params: DurableCommandApprovalContext): string | null {
+  const commandText = params.commandText?.trim();
+  if (!commandText) {
+    return null;
+  }
+  const cwd = normalizeOptionalString(params.cwd) ?? null;
+  const explicitEnvHash = normalizeOptionalString(params.envHash);
+  const envHash =
+    params.envHash !== undefined ? (explicitEnvHash ?? null) : hashDurableCommandEnv(params.env);
+  const identity = JSON.stringify(["v1", commandText, cwd, envHash]);
+  const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 16);
   return `=command:${digest}`;
 }
 
 function hasExactCommandDurableExecApproval(params: {
   allowlist?: readonly ExecAllowlistEntry[];
   commandText?: string | null;
+  cwd?: string | null;
+  env?: Record<string, string | undefined> | null;
+  envHash?: string | null;
 }): boolean {
-  const normalizedCommand = params.commandText?.trim();
-  if (!normalizedCommand) {
+  const commandPattern = buildDurableCommandApprovalPattern(params);
+  if (!commandPattern) {
     return false;
   }
-  const commandPattern = buildDurableCommandApprovalPattern(normalizedCommand);
   return (params.allowlist ?? []).some(
-    (entry) =>
-      entry.source === "allow-always" &&
-      (entry.pattern === commandPattern ||
-        (typeof entry.commandText === "string" && entry.commandText.trim() === normalizedCommand)),
+    (entry) => entry.source === "allow-always" && entry.pattern === commandPattern,
   );
 }
 
@@ -1183,12 +1227,18 @@ export function addDurableCommandApproval(
   approvals: ExecApprovalsFile,
   agentId: string | undefined,
   commandText: string,
+  context?: Omit<DurableCommandApprovalContext, "commandText">,
 ) {
-  const normalized = commandText.trim();
-  if (!normalized) {
+  const pattern = buildDurableCommandApprovalPattern({
+    commandText,
+    cwd: context?.cwd,
+    env: context?.env,
+    envHash: context?.envHash,
+  });
+  if (!pattern) {
     return;
   }
-  addAllowlistEntry(approvals, agentId, buildDurableCommandApprovalPattern(normalized), {
+  addAllowlistEntry(approvals, agentId, pattern, {
     source: "allow-always",
   });
 }
@@ -1252,13 +1302,26 @@ export function resolveExecApprovalRequestAllowedDecisions(params?: {
   ask?: string | null;
   allowedDecisions?: readonly ExecApprovalDecision[] | readonly string[] | null;
 }): readonly ExecApprovalDecision[] {
-  const explicit = Array.isArray(params?.allowedDecisions)
-    ? params.allowedDecisions.filter(
-        (decision): decision is ExecApprovalDecision =>
-          decision === "allow-once" || decision === "allow-always" || decision === "deny",
-      )
-    : [];
-  return explicit.length > 0 ? explicit : resolveExecApprovalAllowedDecisions({ ask: params?.ask });
+  const policyAllowed = resolveExecApprovalAllowedDecisions({ ask: params?.ask });
+  const explicit: ExecApprovalDecision[] = [];
+  if (Array.isArray(params?.allowedDecisions)) {
+    for (const decision of params.allowedDecisions) {
+      if (
+        (decision === "allow-once" || decision === "allow-always" || decision === "deny") &&
+        !explicit.includes(decision)
+      ) {
+        explicit.push(decision);
+      }
+    }
+  }
+  if (explicit.length === 0) {
+    return policyAllowed;
+  }
+  const restricted = explicit.filter((decision) => policyAllowed.includes(decision));
+  const withDeny: ExecApprovalDecision[] = restricted.includes("deny")
+    ? [...restricted]
+    : [...restricted, "deny"];
+  return withDeny.length > 0 ? withDeny : ["deny"];
 }
 
 export function isExecApprovalDecisionAllowed(params: {

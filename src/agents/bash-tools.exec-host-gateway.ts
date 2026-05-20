@@ -4,7 +4,6 @@ import { detectPolicyInlineEval } from "../infra/command-analysis/policy.js";
 import {
   addDurableCommandApproval,
   type ExecAsk,
-  resolveExecApprovalAllowedDecisions,
   type ExecSecurity,
   buildEnforcedShellCommand,
   evaluateShellAllowlist,
@@ -12,6 +11,7 @@ import {
   persistAllowAlwaysPatterns,
   recordAllowlistMatchesUse,
   resolveApprovalAuditCandidatePath,
+  resolveAllowAlwaysPatterns,
   requiresExecApproval,
 } from "../infra/exec-approvals.js";
 import type { SafeBinProfile } from "../infra/exec-safe-bin-policy.js";
@@ -29,6 +29,7 @@ import {
   createExecApprovalDecisionState,
   createAndRegisterDefaultExecApprovalRequest,
   enforceStrictInlineEvalApprovalBoundary,
+  resolveExecApprovalAllowedDecisionsForPersistence,
   resolveApprovalDecisionOrUndefined,
   resolveExecHostApprovalContext,
   sendExecApprovalFollowupResult,
@@ -286,8 +287,10 @@ export async function processGatewayAllowlist(
   const durableApprovalSatisfied = hasDurableExecApproval({
     analysisOk,
     segmentAllowlistEntries: allowlistEval.segmentAllowlistEntries,
-    allowlist: approvals.allowlist,
-    commandText: params.command,
+    allowlist: allowlistEval.exactCommandDurableApprovalAllowed ? approvals.allowlist : undefined,
+    commandText: allowlistEval.exactCommandDurableApprovalAllowed ? params.command : null,
+    cwd: params.workdir,
+    env: params.requestedEnv,
   });
   const inlineEvalHit =
     params.strictInlineEval === true ? detectPolicyInlineEval(allowlistEval.segments) : null;
@@ -326,6 +329,23 @@ export async function processGatewayAllowlist(
   const requiresHeredocApproval =
     hostSecurity === "allowlist" && analysisOk && allowlistSatisfied && hasHeredocSegment;
   const requiresInlineEvalApproval = inlineEvalHit !== null;
+  const allowAlwaysPatterns =
+    !requiresInlineEvalApproval && analysisOk
+      ? resolveAllowAlwaysPatterns({
+          segments: allowlistEval.segments,
+          cwd: params.workdir,
+          env: params.env,
+          platform: process.platform,
+          strictInlineEval: params.strictInlineEval === true,
+        })
+      : [];
+  const allowAlwaysAvailable =
+    !requiresInlineEvalApproval &&
+    (allowlistEval.exactCommandDurableApprovalAllowed || allowAlwaysPatterns.length > 0);
+  const allowedDecisions = resolveExecApprovalAllowedDecisionsForPersistence({
+    ask: hostAsk,
+    allowAlwaysAvailable,
+  });
   const requiresAllowlistPlanApproval =
     hostSecurity === "allowlist" &&
     analysisOk &&
@@ -372,6 +392,7 @@ export async function processGatewayAllowlist(
         security: hostSecurity,
         ask: hostAsk,
         warningText: params.warnings.join("\n").trim() || undefined,
+        allowedDecisions,
         ...buildExecApprovalRequesterContext({
           agentId: params.agentId,
           sessionKey: params.sessionKey,
@@ -486,8 +507,10 @@ export async function processGatewayAllowlist(
       } else if (decision === "allow-once") {
         approvedByAsk = true;
       } else if (decision === "allow-always") {
-        approvedByAsk = true;
-        if (!requiresInlineEvalApproval) {
+        if (!allowAlwaysAvailable) {
+          deniedReason = "approval-decision-unavailable";
+        } else {
+          approvedByAsk = true;
           const patterns = persistAllowAlwaysPatterns({
             approvals: approvals.file,
             agentId: params.agentId,
@@ -497,8 +520,11 @@ export async function processGatewayAllowlist(
             platform: process.platform,
             strictInlineEval: params.strictInlineEval === true,
           });
-          if (patterns.length === 0) {
-            addDurableCommandApproval(approvals.file, params.agentId, params.command);
+          if (patterns.length === 0 && allowlistEval.exactCommandDurableApprovalAllowed) {
+            addDurableCommandApproval(approvals.file, params.agentId, params.command, {
+              cwd: params.workdir,
+              env: params.requestedEnv,
+            });
           }
         }
       }
@@ -595,7 +621,7 @@ export async function processGatewayAllowlist(
         initiatingSurface,
         sentApproverDms,
         unavailableReason,
-        allowedDecisions: resolveExecApprovalAllowedDecisions({ ask: hostAsk }),
+        allowedDecisions,
       }),
     };
   }

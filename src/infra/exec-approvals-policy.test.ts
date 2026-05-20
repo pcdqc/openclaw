@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { DEFAULT_AGENT_ID } from "../routing/session-key.js";
@@ -52,6 +53,20 @@ function expectMalformedAgentAskUsesDefaults(agentAsk: unknown): void {
     effective: "always",
     note: "more aggressive ask wins",
   });
+}
+
+function durableCommandPattern(params: {
+  commandText: string;
+  cwd?: string | null;
+  envHash?: string | null;
+}): string {
+  return `=command:${crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(["v1", params.commandText.trim(), params.cwd ?? null, params.envHash ?? null]),
+    )
+    .digest("hex")
+    .slice(0, 16)}`;
 }
 
 describe("exec approvals policy helpers", () => {
@@ -181,7 +196,9 @@ describe("exec approvals policy helpers", () => {
         segmentAllowlistEntries: [],
         allowlist: [
           {
-            pattern: "=command:613b5a60181648fd",
+            pattern: durableCommandPattern({
+              commandText: 'powershell -NoProfile -Command "Write-Output hi"',
+            }),
             source: "allow-always",
           },
         ],

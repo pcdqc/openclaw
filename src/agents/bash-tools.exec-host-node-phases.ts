@@ -12,8 +12,11 @@ import {
   type SystemRunApprovalPlan,
   evaluateShellAllowlist,
   hasDurableExecApproval,
+  resolveAllowAlwaysPatterns,
   resolveExecApprovalsFromFile,
 } from "../infra/exec-approvals.js";
+import { isShellWrapperInvocation } from "../infra/exec-wrapper-resolution.js";
+import { sanitizeSystemRunEnvOverrides } from "../infra/host-env-security.js";
 import { buildNodeShellCommand } from "../infra/node-shell.js";
 import { parsePreparedSystemRunPayload } from "../infra/system-run-approval-context.js";
 import { formatExecCommand, resolveSystemRunCommandRequest } from "../infra/system-run-command.js";
@@ -48,6 +51,7 @@ type NodeApprovalAnalysis = {
   allowlistSatisfied: boolean;
   durableApprovalSatisfied: boolean;
   inlineEvalHit: InterpreterInlineEvalHit | null;
+  allowAlwaysAvailable: boolean;
 };
 
 export function shouldSkipNodeApprovalPrepare(params: {
@@ -301,6 +305,19 @@ export async function analyzeNodeApprovalRequirement(params: {
     params.request.strictInlineEval === true
       ? detectPolicyInlineEval(baseAllowlistEval.segments)
       : null;
+  const allowAlwaysPatterns =
+    inlineEvalHit === null && baseAllowlistEval.analysisOk
+      ? resolveAllowAlwaysPatterns({
+          segments: baseAllowlistEval.segments,
+          cwd: params.request.workdir,
+          env: params.request.env,
+          platform: params.target.platform,
+          strictInlineEval: params.request.strictInlineEval === true,
+        })
+      : [];
+  const allowAlwaysAvailable =
+    inlineEvalHit === null &&
+    (baseAllowlistEval.exactCommandDurableApprovalAllowed || allowAlwaysPatterns.length > 0);
   if (inlineEvalHit) {
     params.request.warnings.push(
       `Warning: strict inline-eval mode requires explicit approval for ${describeInterpreterInlineEval(
@@ -310,6 +327,10 @@ export async function analyzeNodeApprovalRequirement(params: {
   }
   if ((params.hostAsk === "always" || params.hostSecurity === "allowlist") && analysisOk) {
     try {
+      const preparedApprovalEnv = sanitizeSystemRunEnvOverrides({
+        overrides: params.target.env,
+        shellWrapper: isShellWrapperInvocation(params.prepared.argv),
+      });
       const approvalsSnapshot = await callGatewayTool<{ file: string }>(
         "exec.approvals.node.get",
         { timeoutMs: 10_000 },
@@ -338,8 +359,14 @@ export async function analyzeNodeApprovalRequirement(params: {
         durableApprovalSatisfied = hasDurableExecApproval({
           analysisOk: allowlistEval.analysisOk,
           segmentAllowlistEntries: allowlistEval.segmentAllowlistEntries,
-          allowlist: resolved.allowlist,
-          commandText: params.prepared.rawCommand,
+          allowlist: allowlistEval.exactCommandDurableApprovalAllowed
+            ? resolved.allowlist
+            : undefined,
+          commandText: allowlistEval.exactCommandDurableApprovalAllowed
+            ? params.prepared.rawCommand
+            : null,
+          cwd: params.prepared.cwd,
+          env: preparedApprovalEnv,
         });
         allowlistSatisfied = allowlistEval.allowlistSatisfied;
         analysisOk = allowlistEval.analysisOk;
@@ -353,5 +380,6 @@ export async function analyzeNodeApprovalRequirement(params: {
     allowlistSatisfied,
     durableApprovalSatisfied,
     inlineEvalHit,
+    allowAlwaysAvailable,
   };
 }

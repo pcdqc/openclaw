@@ -13,11 +13,13 @@ import {
   unwrapKnownDispatchWrapperInvocation,
   unwrapKnownShellMultiplexerInvocation,
 } from "../infra/exec-wrapper-resolution.js";
+import { hasFishStartupCommandOptionBeforeCommandOperand } from "../infra/fish-shell-options.js";
 import { sameFileIdentity } from "../infra/fs-safe-advanced.js";
 import {
-  POSIX_INLINE_COMMAND_FLAGS,
-  resolveInlineCommandMatch,
-} from "../infra/shell-inline-command.js";
+  hasPosixShellStartupOptionBeforeCommandOperand,
+  posixShellShortOptionConsumesNextArg,
+  resolvePosixInlineCommandMatch,
+} from "../infra/posix-shell-options.js";
 import { formatExecCommand, resolveSystemRunCommandRequest } from "../infra/system-run-command.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -156,6 +158,7 @@ const POSIX_SHELL_OPTIONS_WITH_VALUE = new Set([
   "--rcfile",
   "--startup-script",
   "-o",
+  "+o",
 ]);
 
 const NPM_EXEC_OPTIONS_WITH_VALUE = new Set([
@@ -203,6 +206,20 @@ const PNPM_FLAG_OPTIONS = new Set([
 ]);
 
 const PNPM_DLX_OPTIONS_WITH_VALUE = new Set(["--allow-build", "--package", "-p"]);
+
+function hasFishStartupCommandOptionBeforeScript(argv: string[]): boolean {
+  if (normalizeExecutableToken(argv[0] ?? "") !== "fish") {
+    return false;
+  }
+  return hasFishStartupCommandOptionBeforeCommandOperand(argv);
+}
+
+function hasPosixStartupOptionBeforeScript(argv: string[]): boolean {
+  if (!(POSIX_SHELL_WRAPPERS as ReadonlySet<string>).has(normalizeExecutableToken(argv[0] ?? ""))) {
+    return false;
+  }
+  return hasPosixShellStartupOptionBeforeCommandOperand(argv);
+}
 
 type FileOperandCollection = {
   hits: number[];
@@ -580,11 +597,7 @@ function unwrapNpmExecInvocation(argv: string[]): string[] | null {
 }
 
 function resolvePosixShellScriptOperandIndex(argv: string[]): number | null {
-  if (
-    resolveInlineCommandMatch(argv, POSIX_INLINE_COMMAND_FLAGS, {
-      allowCombinedC: true,
-    }).valueTokenIndex !== null
-  ) {
+  if (resolvePosixInlineCommandMatch(argv).valueTokenIndex !== null) {
     return null;
   }
   let afterDoubleDash = false;
@@ -603,9 +616,9 @@ function resolvePosixShellScriptOperandIndex(argv: string[]): number | null {
     if (!afterDoubleDash && token === "-s") {
       return null;
     }
-    if (!afterDoubleDash && token.startsWith("-")) {
+    if (!afterDoubleDash && (token.startsWith("-") || token.startsWith("+"))) {
       const flag = normalizeOptionFlag(token);
-      if (POSIX_SHELL_OPTIONS_WITH_VALUE.has(flag)) {
+      if (POSIX_SHELL_OPTIONS_WITH_VALUE.has(flag) || posixShellShortOptionConsumesNextArg(token)) {
         if (!token.includes("=")) {
           i += 1;
         }
@@ -865,6 +878,12 @@ function resolveMutableFileOperandIndex(argv: string[], cwd: string | undefined)
     return null;
   }
   if ((POSIX_SHELL_WRAPPERS as ReadonlySet<string>).has(executable)) {
+    if (
+      hasFishStartupCommandOptionBeforeScript(unwrapped.argv) ||
+      hasPosixStartupOptionBeforeScript(unwrapped.argv)
+    ) {
+      return null;
+    }
     const shellIndex = resolvePosixShellScriptOperandIndex(unwrapped.argv);
     return shellIndex === null ? null : unwrapped.baseIndex + shellIndex;
   }
@@ -949,17 +968,21 @@ function requiresStableInterpreterApprovalBindingWithShellCommand(params: {
   if (unwrapped.opaqueMultiplexerSeen) {
     return true;
   }
+  const executable = normalizeExecutableToken(unwrapped.argv[0] ?? "");
+  if (
+    (POSIX_SHELL_WRAPPERS as ReadonlySet<string>).has(executable) &&
+    (hasFishStartupCommandOptionBeforeScript(unwrapped.argv) ||
+      hasPosixStartupOptionBeforeScript(unwrapped.argv))
+  ) {
+    return true;
+  }
   if (params.shellCommand !== null) {
     return shellPayloadNeedsStableBinding(params.shellCommand, params.cwd);
   }
   if (pnpmDlxInvocationNeedsFailClosedBinding(params.argv, params.cwd)) {
     return true;
   }
-  const executable = normalizeExecutableToken(unwrapped.argv[0] ?? "");
   if (!executable) {
-    return false;
-  }
-  if ((POSIX_SHELL_WRAPPERS as ReadonlySet<string>).has(executable)) {
     return false;
   }
   return isMutableScriptRunner(executable);

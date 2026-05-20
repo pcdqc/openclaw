@@ -33,6 +33,7 @@ let enforceStrictInlineEvalApprovalBoundary: typeof import("./bash-tools.exec-ho
 let resolveExecHostApprovalContext: typeof import("./bash-tools.exec-host-shared.js").resolveExecHostApprovalContext;
 let resolveExecApprovalUnavailableState: typeof import("./bash-tools.exec-host-shared.js").resolveExecApprovalUnavailableState;
 let buildExecApprovalPendingToolResult: typeof import("./bash-tools.exec-host-shared.js").buildExecApprovalPendingToolResult;
+let resolveExecApprovalAllowedDecisionsForPersistence: typeof import("./bash-tools.exec-host-shared.js").resolveExecApprovalAllowedDecisionsForPersistence;
 
 beforeAll(async () => {
   ({
@@ -42,6 +43,7 @@ beforeAll(async () => {
     resolveExecHostApprovalContext,
     resolveExecApprovalUnavailableState,
     buildExecApprovalPendingToolResult,
+    resolveExecApprovalAllowedDecisionsForPersistence,
   } = await import("./bash-tools.exec-host-shared.js"));
 });
 
@@ -231,6 +233,26 @@ describe("enforceStrictInlineEvalApprovalBoundary", () => {
       approvedByAsk: true,
       deniedReason: null,
     });
+  });
+});
+
+describe("resolveExecApprovalAllowedDecisionsForPersistence", () => {
+  it("omits allow-always when no durable approval can be persisted", () => {
+    expect(
+      resolveExecApprovalAllowedDecisionsForPersistence({
+        ask: "always",
+        allowAlwaysAvailable: false,
+      }),
+    ).toEqual(["allow-once", "deny"]);
+  });
+
+  it("keeps allow-always when durable approval is available", () => {
+    expect(
+      resolveExecApprovalAllowedDecisionsForPersistence({
+        ask: "on-miss",
+        allowAlwaysAvailable: true,
+      }),
+    ).toEqual(["allow-once", "allow-always", "deny"]);
   });
 });
 

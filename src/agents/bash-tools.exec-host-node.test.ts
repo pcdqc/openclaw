@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type StrictInlineEvalBoundary =
   typeof import("./bash-tools.exec-host-shared.js").enforceStrictInlineEvalApprovalBoundary;
+type HasDurableExecApproval = typeof import("../infra/exec-approvals.js").hasDurableExecApproval;
 
 const INLINE_EVAL_HIT = {
   executable: "python3",
@@ -40,6 +41,26 @@ const createAndRegisterDefaultExecApprovalRequestMock = vi.hoisted(() => vi.fn()
 const resolveApprovalDecisionOrUndefinedMock = vi.hoisted(() =>
   vi.fn(async (): Promise<string | null | undefined> => "allow-once"),
 );
+const evaluateShellAllowlistMock = vi.hoisted(() =>
+  vi.fn(() => ({
+    allowlistMatches: [],
+    analysisOk: true,
+    allowlistSatisfied: false,
+    exactCommandDurableApprovalAllowed: false,
+    segments: [{ resolution: null, argv: ["bun", "./script.ts"] }],
+    segmentAllowlistEntries: [],
+  })),
+);
+const hasDurableExecApprovalMock = vi.hoisted(() => vi.fn<HasDurableExecApproval>(() => false));
+const resolveAllowAlwaysPatternsMock = vi.hoisted(() => vi.fn((): string[] => []));
+const resolveExecApprovalAllowedDecisionsForPersistenceMock = vi.hoisted(() =>
+  vi.fn((params: { ask?: string | null; allowAlwaysAvailable: boolean }) => {
+    if (params.ask === "always" || !params.allowAlwaysAvailable) {
+      return ["allow-once", "deny"];
+    }
+    return ["allow-once", "allow-always", "deny"];
+  }),
+);
 const createExecApprovalDecisionStateMock = vi.hoisted(() =>
   vi.fn(
     (): {
@@ -76,16 +97,11 @@ const detectInterpreterInlineEvalArgvMock = vi.hoisted(() =>
 );
 
 vi.mock("../infra/exec-approvals.js", () => ({
-  evaluateShellAllowlist: vi.fn(() => ({
-    allowlistMatches: [],
-    analysisOk: true,
-    allowlistSatisfied: false,
-    segments: [{ resolution: null, argv: ["bun", "./script.ts"] }],
-    segmentAllowlistEntries: [],
-  })),
-  hasDurableExecApproval: vi.fn(() => false),
+  evaluateShellAllowlist: evaluateShellAllowlistMock,
+  hasDurableExecApproval: hasDurableExecApprovalMock,
   requiresExecApproval: requiresExecApprovalMock,
   resolveExecApprovalAllowedDecisions: vi.fn(() => ["allow-once", "allow-always", "deny"]),
+  resolveAllowAlwaysPatterns: resolveAllowAlwaysPatternsMock,
   resolveExecApprovalsFromFile: vi.fn(() => ({
     allowlist: [],
     file: { version: 1, agents: {} },
@@ -98,7 +114,7 @@ vi.mock("../infra/command-analysis/inline-eval.js", () => ({
 }));
 
 vi.mock("../infra/node-shell.js", () => ({
-  buildNodeShellCommand: vi.fn(() => ["bash", "-lc", "bun ./script.ts"]),
+  buildNodeShellCommand: vi.fn(() => ["bash", "-c", "bun ./script.ts"]),
 }));
 
 vi.mock("../infra/system-run-approval-context.js", () => ({
@@ -118,6 +134,8 @@ vi.mock("./bash-tools.exec-host-shared.js", () => ({
   shouldResolveExecApprovalUnavailableInline: vi.fn(() => false),
   buildExecApprovalFollowupTarget: vi.fn(() => ({ approvalId: "approval-1" })),
   resolveApprovalDecisionOrUndefined: resolveApprovalDecisionOrUndefinedMock,
+  resolveExecApprovalAllowedDecisionsForPersistence:
+    resolveExecApprovalAllowedDecisionsForPersistenceMock,
   createExecApprovalDecisionState: createExecApprovalDecisionStateMock,
   enforceStrictInlineEvalApprovalBoundary: enforceStrictInlineEvalApprovalBoundaryMock,
   sendExecApprovalFollowupResult: sendExecApprovalFollowupResultMock,
@@ -230,6 +248,28 @@ describe("executeNodeHostCommand", () => {
     });
     resolveApprovalDecisionOrUndefinedMock.mockReset();
     resolveApprovalDecisionOrUndefinedMock.mockResolvedValue("allow-once");
+    evaluateShellAllowlistMock.mockReset();
+    evaluateShellAllowlistMock.mockReturnValue({
+      allowlistMatches: [],
+      analysisOk: true,
+      allowlistSatisfied: false,
+      exactCommandDurableApprovalAllowed: false,
+      segments: [{ resolution: null, argv: ["bun", "./script.ts"] }],
+      segmentAllowlistEntries: [],
+    });
+    hasDurableExecApprovalMock.mockReset();
+    hasDurableExecApprovalMock.mockReturnValue(false);
+    resolveAllowAlwaysPatternsMock.mockReset();
+    resolveAllowAlwaysPatternsMock.mockReturnValue([]);
+    resolveExecApprovalAllowedDecisionsForPersistenceMock.mockReset();
+    resolveExecApprovalAllowedDecisionsForPersistenceMock.mockImplementation(
+      (params: { ask?: string | null; allowAlwaysAvailable: boolean }) => {
+        if (params.ask === "always" || !params.allowAlwaysAvailable) {
+          return ["allow-once", "deny"];
+        }
+        return ["allow-once", "allow-always", "deny"];
+      },
+    );
     createExecApprovalDecisionStateMock.mockReset();
     createExecApprovalDecisionStateMock.mockReturnValue({
       baseDecision: { timedOut: false },
@@ -256,7 +296,7 @@ describe("executeNodeHostCommand", () => {
     resolveExecHostApprovalContextMock.mockReturnValue({
       approvals: { allowlist: [], file: { version: 1, agents: {} } },
       hostSecurity: "full",
-      hostAsk: "always",
+      hostAsk: "on-miss",
       askFallback: "deny",
     });
 
@@ -277,28 +317,31 @@ describe("executeNodeHostCommand", () => {
     expect(registerExecApprovalRequestForHostOrThrowMock).toHaveBeenCalledWith(
       expect.objectContaining({
         systemRunPlan: preparedPlan,
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    );
+    expect(buildExecApprovalPendingToolResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
       }),
     );
 
     await vi.waitFor(() => {
-      expect(callGatewayToolMock).toHaveBeenCalledTimes(3);
-    });
-
-    expect(callGatewayToolMock).toHaveBeenNthCalledWith(
-      3,
-      "node.invoke",
-      expect.objectContaining({ timeoutMs: 35_000 }),
-      expect.objectContaining({
-        command: "system.run",
-        params: expect.objectContaining({
-          approved: true,
-          approvalDecision: "allow-once",
-          systemRunPlan: preparedPlan,
-          timeoutMs: 30_000,
+      expect(callGatewayToolMock).toHaveBeenCalledWith(
+        "node.invoke",
+        expect.objectContaining({ timeoutMs: 35_000 }),
+        expect.objectContaining({
+          command: "system.run",
+          params: expect.objectContaining({
+            approved: true,
+            approvalDecision: "allow-once",
+            systemRunPlan: preparedPlan,
+            timeoutMs: 30_000,
+          }),
         }),
-      }),
-      { scopes: ["operator.write", "operator.approvals"] },
-    );
+        { scopes: ["operator.write", "operator.approvals"] },
+      );
+    });
   });
 
   it("builds a local systemRunPlan when approval is required and the node omits prepare", async () => {
@@ -332,9 +375,9 @@ describe("executeNodeHostCommand", () => {
     expect(result.details?.status).toBe("approval-pending");
     expect(parsePreparedSystemRunPayloadMock).not.toHaveBeenCalled();
     const expectedPlan = {
-      argv: ["bash", "-lc", "bun ./script.ts"],
+      argv: ["bash", "-c", "bun ./script.ts"],
       cwd: "/tmp/work",
-      commandText: 'bash -lc "bun ./script.ts"',
+      commandText: 'bash -c "bun ./script.ts"',
       commandPreview: "bun ./script.ts",
       agentId: "requested-agent",
       sessionKey: "requested-session",
@@ -383,7 +426,7 @@ describe("executeNodeHostCommand", () => {
       expect.objectContaining({
         command: "system.run",
         params: expect.objectContaining({
-          command: ["bash", "-lc", "bun ./script.ts"],
+          command: ["bash", "-c", "bun ./script.ts"],
           rawCommand: "bun ./script.ts",
           suppressNotifyOnExit: true,
           timeoutMs: 30_000,
@@ -548,5 +591,183 @@ describe("executeNodeHostCommand", () => {
       );
     });
     expect(callGatewayToolMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not advertise or accept allow-always when node durable persistence is unavailable", async () => {
+    resolveExecHostApprovalContextMock.mockReturnValue({
+      approvals: { allowlist: [], file: { version: 1, agents: {} } },
+      hostSecurity: "full",
+      hostAsk: "always",
+      askFallback: "deny",
+    });
+    resolveApprovalDecisionOrUndefinedMock.mockResolvedValue("allow-always");
+    createExecApprovalDecisionStateMock.mockReturnValue({
+      baseDecision: { timedOut: false },
+      approvedByAsk: true,
+      deniedReason: null,
+    });
+
+    const result = await executeNodeHostCommand({
+      command: 'pwsh -Command "/bin/echo ok"',
+      workdir: "/tmp/work",
+      env: {},
+      security: "full",
+      ask: "off",
+      defaultTimeoutSec: 30,
+      approvalRunningNoticeMs: 0,
+      warnings: [],
+      agentId: "requested-agent",
+      sessionKey: "requested-session",
+    });
+
+    expect(result.details?.status).toBe("approval-pending");
+    expect(registerExecApprovalRequestForHostOrThrowMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    );
+    expect(buildExecApprovalPendingToolResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(sendExecApprovalFollowupResultMock).toHaveBeenCalledWith(
+        { approvalId: "approval-1" },
+        'Exec denied (node=node-1 id=approval-1, approval-decision-unavailable): pwsh -Command "/bin/echo ok"',
+      );
+    });
+    expect(callGatewayToolMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps allow-always available when node durable persistence can be derived", async () => {
+    resolveExecHostApprovalContextMock.mockReturnValue({
+      approvals: { allowlist: [], file: { version: 1, agents: {} } },
+      hostSecurity: "full",
+      hostAsk: "on-miss",
+      askFallback: "deny",
+    });
+    resolveAllowAlwaysPatternsMock.mockReturnValue(["/bin/echo"]);
+    resolveApprovalDecisionOrUndefinedMock.mockResolvedValue("allow-always");
+    createExecApprovalDecisionStateMock.mockReturnValue({
+      baseDecision: { timedOut: false },
+      approvedByAsk: true,
+      deniedReason: null,
+    });
+
+    const result = await executeNodeHostCommand({
+      command: "echo ok",
+      workdir: "/tmp/work",
+      env: {},
+      security: "full",
+      ask: "off",
+      defaultTimeoutSec: 30,
+      approvalRunningNoticeMs: 0,
+      warnings: [],
+      agentId: "requested-agent",
+      sessionKey: "requested-session",
+    });
+
+    expect(result.details?.status).toBe("approval-pending");
+    expect(registerExecApprovalRequestForHostOrThrowMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "allow-always", "deny"],
+      }),
+    );
+    expect(buildExecApprovalPendingToolResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "allow-always", "deny"],
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(callGatewayToolMock).toHaveBeenCalledTimes(2);
+    });
+    expect(callGatewayToolMock).toHaveBeenNthCalledWith(
+      2,
+      "node.invoke",
+      expect.objectContaining({ timeoutMs: 35_000 }),
+      expect.objectContaining({
+        command: "system.run",
+        params: expect.objectContaining({
+          approved: true,
+          approvalDecision: "allow-always",
+        }),
+      }),
+      { scopes: ["operator.write", "operator.approvals"] },
+    );
+  });
+
+  it("checks node durable exact approvals with prepared cwd and filtered env", async () => {
+    const preparedShellPlan = {
+      ...preparedPlan,
+      argv: ["/bin/sh", "-c", "echo ok"],
+      cwd: "/private/tmp/work",
+      commandText: '/bin/sh -c "echo ok"',
+      commandPreview: "echo ok",
+      mutableFileOperand: undefined,
+    };
+    parsePreparedSystemRunPayloadMock.mockReturnValue({ plan: preparedShellPlan });
+    resolveExecHostApprovalContextMock.mockReturnValue({
+      approvals: { allowlist: [], file: { version: 1, agents: {} } },
+      hostSecurity: "allowlist",
+      hostAsk: "on-miss",
+      askFallback: "deny",
+    });
+    evaluateShellAllowlistMock.mockReturnValue({
+      allowlistMatches: [],
+      analysisOk: true,
+      allowlistSatisfied: false,
+      exactCommandDurableApprovalAllowed: true,
+      segments: [{ resolution: null, argv: ["echo", "ok"] }],
+      segmentAllowlistEntries: [],
+    });
+    callGatewayToolMock.mockImplementation(
+      async (method: string, _options: unknown, params: MockNodeInvokeParams | undefined) => {
+        if (method === "exec.approvals.node.get") {
+          return { file: { version: 1, agents: { main: { allowlist: [] } } } };
+        }
+        if (method !== "node.invoke") {
+          throw new Error(`unexpected gateway method: ${method}`);
+        }
+        if (params?.command === "system.run.prepare") {
+          return { payload: { plan: preparedShellPlan } };
+        }
+        if (params?.command === "system.run") {
+          return {
+            payload: {
+              success: true,
+              stdout: "ok",
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+            },
+          };
+        }
+        throw new Error(`unexpected node invoke command: ${String(params?.command)}`);
+      },
+    );
+
+    await executeNodeHostCommand({
+      command: "echo ok",
+      workdir: "/tmp/work",
+      env: { TERM: "xterm-256color", FOO: "gateway-env" },
+      requestedEnv: { TERM: "xterm-256color", FOO: "request-only" },
+      security: "allowlist",
+      ask: "on-miss",
+      defaultTimeoutSec: 30,
+      approvalRunningNoticeMs: 0,
+      warnings: [],
+      agentId: "requested-agent",
+      sessionKey: "requested-session",
+    });
+
+    const durableArgs = hasDurableExecApprovalMock.mock.calls.at(-1)?.[0];
+    expect(durableArgs).toEqual(
+      expect.objectContaining({
+        commandText: preparedShellPlan.commandText,
+        cwd: preparedShellPlan.cwd,
+        env: { TERM: "xterm-256color" },
+      }),
+    );
   });
 });

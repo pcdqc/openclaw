@@ -14,6 +14,7 @@ struct ExecApprovalPromptRequest: Codable {
     var agentId: String?
     var resolvedPath: String?
     var sessionKey: String?
+    var allowedDecisions: [ExecApprovalDecision]? = nil
 }
 
 private struct ExecApprovalSocketRequest: Codable {
@@ -226,6 +227,45 @@ final class ExecApprovalsPromptServer {
 }
 
 enum ExecApprovalsPromptPresenter {
+    static func allowedDecisions(
+        ask: ExecAsk,
+        allowAlwaysAvailable: Bool = true) -> [ExecApprovalDecision]
+    {
+        ExecApprovalHelpers.allowedDecisions(
+            ask: ask,
+            allowAlwaysAvailable: allowAlwaysAvailable)
+    }
+
+    static func allowedDecisions(for request: ExecApprovalPromptRequest) -> [ExecApprovalDecision] {
+        ExecApprovalHelpers.requestAllowedDecisions(
+            ask: request.ask,
+            allowedDecisions: request.allowedDecisions)
+    }
+
+    static func buttonTitle(for decision: ExecApprovalDecision) -> String {
+        switch decision {
+        case .allowOnce:
+            "Allow Once"
+        case .allowAlways:
+            "Always Allow"
+        case .deny:
+            "Don't Allow"
+        }
+    }
+
+    static func decision(for response: NSApplication.ModalResponse, decisions: [ExecApprovalDecision]) -> ExecApprovalDecision {
+        switch response {
+        case .alertFirstButtonReturn:
+            decisions.indices.contains(0) ? decisions[0] : .deny
+        case .alertSecondButtonReturn:
+            decisions.indices.contains(1) ? decisions[1] : .deny
+        case .alertThirdButtonReturn:
+            decisions.indices.contains(2) ? decisions[2] : .deny
+        default:
+            .deny
+        }
+    }
+
     @MainActor
     static func prompt(_ request: ExecApprovalPromptRequest) -> ExecApprovalDecision {
         NSApp.activate(ignoringOtherApps: true)
@@ -235,21 +275,17 @@ enum ExecApprovalsPromptPresenter {
         alert.informativeText = "Review the command details before allowing."
         alert.accessoryView = self.buildAccessoryView(request)
 
-        alert.addButton(withTitle: "Allow Once")
-        alert.addButton(withTitle: "Always Allow")
-        alert.addButton(withTitle: "Don't Allow")
-        if #available(macOS 11.0, *), alert.buttons.indices.contains(2) {
-            alert.buttons[2].hasDestructiveAction = true
+        let decisions = self.allowedDecisions(for: request)
+        for decision in decisions {
+            alert.addButton(withTitle: self.buttonTitle(for: decision))
+        }
+        if #available(macOS 11.0, *), let denyIndex = decisions.firstIndex(of: .deny),
+           alert.buttons.indices.contains(denyIndex)
+        {
+            alert.buttons[denyIndex].hasDestructiveAction = true
         }
 
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            return .allowOnce
-        case .alertSecondButtonReturn:
-            return .allowAlways
-        default:
-            return .deny
-        }
+        return self.decision(for: alert.runModal(), decisions: decisions)
     }
 
     @MainActor
@@ -401,7 +437,10 @@ private enum ExecHostExecutor {
                     ask: context.ask.rawValue,
                     agentId: context.agentId,
                     resolvedPath: context.resolution?.resolvedPath,
-                    sessionKey: request.sessionKey))
+                    sessionKey: request.sessionKey,
+                    allowedDecisions: ExecApprovalsPromptPresenter.allowedDecisions(
+                        ask: context.ask,
+                        allowAlwaysAvailable: context.allowAlwaysAvailable)))
 
             let followupDecision: ExecApprovalDecision
             switch decision {
@@ -481,6 +520,13 @@ private enum ExecHostExecutor {
         var seenPatterns = Set<String>()
         for pattern in context.allowAlwaysPatterns where seenPatterns.insert(pattern).inserted {
             ExecApprovalsStore.addAllowlistEntry(agentId: context.agentId, pattern: pattern)
+        }
+        if seenPatterns.isEmpty, context.exactCommandDurableApprovalAllowed {
+            ExecApprovalsStore.addDurableCommandApproval(
+                agentId: context.agentId,
+                commandText: context.displayCommand,
+                cwd: context.cwd,
+                env: context.approvalEnv)
         }
     }
 

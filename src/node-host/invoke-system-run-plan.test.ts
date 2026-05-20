@@ -640,7 +640,7 @@ describe("hardenApprovedExecutionPaths", () => {
     }
     const binaryPath = resolveNativeBinaryFixturePath();
     const prepared = buildSystemRunApprovalPlan({
-      command: ["/bin/sh", "-lc", binaryPath],
+      command: ["/bin/sh", "-c", binaryPath],
       rawCommand: binaryPath,
       cwd: process.cwd(),
     });
@@ -758,6 +758,27 @@ describe("hardenApprovedExecutionPaths", () => {
       },
     ]) {
       expectShellPayloadApprovalDenied(testCase);
+    }
+  });
+
+  it("keeps fail-closed behavior for POSIX -c option clusters before shell payload files", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-clustered-c-binding-");
+    fs.writeFileSync(path.join(tmp, "run.sh"), "#!/bin/sh\necho SAFE\n");
+
+    for (const argv of [
+      ["/bin/bash", "-ce", "./run.sh"],
+      ["/bin/bash", "-cx", "./run.sh"],
+      ["/bin/bash", "-co", "errexit", "./run.sh"],
+      ["/bin/bash", "-oc", "errexit", "./run.sh"],
+    ]) {
+      runNamedCase(argv.join(" "), () => {
+        expect(buildSystemRunApprovalPlan({ command: argv, cwd: tmp })).toEqual(
+          DENIED_RUNTIME_APPROVAL,
+        );
+      });
     }
   });
 
@@ -945,6 +966,152 @@ describe("hardenApprovedExecutionPaths", () => {
         argvIndex: 3,
         path: fs.realpathSync(scriptPath),
         sha256: expect.any(String),
+      },
+    });
+  });
+
+  it("captures POSIX shell script operands after uppercase -C", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-uppercase-c-");
+    const scriptPath = path.join(tmp, "run.sh");
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho SAFE\n");
+    const snapshot = resolveMutableFileOperandSnapshotSync({
+      argv: ["/bin/bash", "-C", "./run.sh"],
+      cwd: tmp,
+      shellCommand: null,
+    });
+    expect(snapshot).toEqual({
+      ok: true,
+      snapshot: {
+        argvIndex: 2,
+        path: fs.realpathSync(scriptPath),
+        sha256: expect.any(String),
+      },
+    });
+  });
+
+  it("captures POSIX shell script operands before later inline-looking arguments", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-script-before-c-");
+    const scriptPath = path.join(tmp, "run.sh");
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho SAFE\n");
+    const snapshot = resolveMutableFileOperandSnapshotSync({
+      argv: ["/bin/bash", "-C", "./run.sh", "-c", "echo WRONG"],
+      cwd: tmp,
+      shellCommand: null,
+    });
+    expect(snapshot).toEqual({
+      ok: true,
+      snapshot: {
+        argvIndex: 2,
+        path: fs.realpathSync(scriptPath),
+        sha256: expect.any(String),
+      },
+    });
+  });
+
+  it("captures POSIX shell script operands after clustered value options", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-clustered-value-option-");
+    const scriptPath = path.join(tmp, "run.sh");
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho SAFE\n");
+    fs.writeFileSync(path.join(tmp, "pipefail"), "echo WRONG\n");
+    fs.writeFileSync(path.join(tmp, "extglob"), "echo WRONG\n");
+
+    for (const argv of [
+      ["/bin/bash", "-oC", "pipefail", "./run.sh"],
+      ["/bin/bash", "-OC", "extglob", "./run.sh"],
+      ["/bin/bash", "+oC", "pipefail", "./run.sh"],
+    ]) {
+      runNamedCase(argv.join(" "), () => {
+        const snapshot = resolveMutableFileOperandSnapshotSync({
+          argv,
+          cwd: tmp,
+          shellCommand: null,
+        });
+        expect(snapshot).toEqual({
+          ok: true,
+          snapshot: {
+            argvIndex: 3,
+            path: fs.realpathSync(scriptPath),
+            sha256: expect.any(String),
+          },
+        });
+      });
+    }
+  });
+
+  it("denies POSIX shell startup options before shell script operands", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-startup-script-");
+    fs.writeFileSync(path.join(tmp, "run.sh"), "echo SAFE\n");
+
+    for (const argv of [
+      ["bash", "--login", "-C", "./run.sh"],
+      ["bash", "-l", "-C", "./run.sh"],
+      ["bash", "-i", "-C", "./run.sh"],
+      ["bash", "-lC", "./run.sh"],
+      ["bash", "-O", "extglob", "-l", "-C", "./run.sh"],
+    ]) {
+      expectRuntimeApprovalDenied(argv, tmp);
+    }
+  });
+
+  it("denies POSIX shell startup options before inline shell payloads", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = createFixtureDir("openclaw-shell-startup-inline-");
+    fs.writeFileSync(path.join(tmp, "evilrc"), "echo EVIL\n");
+
+    for (const argv of [
+      ["bash", "--rcfile", "./evilrc", "-ic", "echo ok"],
+      ["bash", "--rcfile=./evilrc", "-ic", "echo ok"],
+      ["bash", "--login", "-c", "echo ok"],
+      ["bash", "-i", "-c", "echo ok"],
+      ["bash", "-ic", "echo ok"],
+      ["bash", "-ci", "echo ok"],
+      ["bash", "-l", "-c", "echo ok"],
+      ["bash", "-lc", "echo ok"],
+      ["bash", "-cl", "echo ok"],
+      ["bash", "-O", "extglob", "-l", "-c", "echo ok"],
+      ["bash", "-co", "pipefail", "-i", "echo ok"],
+      ["bash", "-cO", "extglob", "-l", "echo ok"],
+      ["zsh", "-c", "echo ok"],
+      ["zsh", "-f", "+f", "-c", "echo ok"],
+      ["zsh", "--no-rcs", "-o=rcs", "-c", "echo ok"],
+    ]) {
+      expectRuntimeApprovalDenied(argv, tmp);
+    }
+  });
+
+  it("denies fish startup-command options before shell script operands", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    withFakeRuntimeBins({
+      binNames: ["fish"],
+      run: () => {
+        const tmp = createFixtureDir("openclaw-fish-startup-command-");
+        fs.writeFileSync(path.join(tmp, "trusted.fish"), "echo TRUSTED\n");
+        fs.writeFileSync(path.join(tmp, "evil.fish"), "echo EVIL\n");
+        for (const command of [
+          ["fish", "-C", "./trusted.fish", "./evil.fish"],
+          ["fish", "-C./trusted.fish", "./evil.fish"],
+          ["fish", "-NC./trusted.fish", "./evil.fish"],
+          ["fish", "--init-command", "./trusted.fish", "./evil.fish"],
+          ["fish", "--init-command=./trusted.fish", "./evil.fish"],
+        ]) {
+          expectRuntimeApprovalDenied(command, tmp);
+        }
       },
     });
   });
